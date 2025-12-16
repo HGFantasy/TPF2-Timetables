@@ -19,6 +19,8 @@ local co = nil
 local state = nil
 
 local timetableChanged = false
+local newTimetableState = {}
+local clearConstraintWindowLaterHACK = nil
 
 local stationTableScrollOffset
 local lineTableScrollOffset
@@ -787,9 +789,11 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
 
         -- cleanup
         timetableChanged = true
-        timetableGUI.initStationTable()
-        timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-        timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
+		clearConstraintWindowLaterHACK = function()
+            timetableGUI.initStationTable()
+            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
+		end
     end
     local generateButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("Generate"), true)
     generateButton:setGravity(1, 0)
@@ -809,16 +813,13 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
 
         if #conditions > 1 then
             generateButton:setEnabled(false)
-            -- "Regenerate will replace current timetable"
-            timetableGUI.popUpYesNo("Override?", function()
-                local condition1 = conditions[1]
-                timetable.removeAllConditions(lineID, stationID, "ArrDep")
-                timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {condition1}})
-                generate(separationIndex, condition1)
-                generateButton:setEnabled(true)
-            end, function()
-                generateButton:setEnabled(true)
-            end)
+
+            local condition1 = conditions[1]
+            timetable.removeAllConditions(lineID, stationID, "ArrDep")
+            timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {condition1}})
+            generate(separationIndex, condition1)
+            generateButton:setEnabled(true)
+
         else
             generate(separationIndex, conditions[1])
         end
@@ -835,30 +836,26 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
     addButton:setGravity(-1,0)
     addButton:onClick(function()
         timetable.addCondition(lineID,stationID, {type = "ArrDep", ArrDep = {{0,0,0,0}}})
-        timetableChanged = true
-
+		timetableChanged = true
+		clearConstraintWindowLaterHACK = function()
             timetableGUI.initStationTable()
             timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
             timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
+		end
     end)
 
     -- setup deleteButton button
     local deleteButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("X All"), true)
     deleteButton:setGravity(-1,0)
     deleteButton:onClick(function()
-        deleteButton:setEnabled(false)
 
-        timetableGUI.popUpYesNo("Delete All?", function()
-            timetable.removeAllConditions(lineID, stationID, "ArrDep")
-            timetableChanged = true
+        timetable.removeAllConditions(lineID, stationID, "ArrDep")
+        timetableChanged = true
+		clearConstraintWindowLaterHACK = function()
             timetableGUI.initStationTable()
             timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
             timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
-            
-            deleteButton:setEnabled(true)
-        end, function()
-            deleteButton:setEnabled(true)
-        end)
+        end          
     end)
 
     --setup header
@@ -890,10 +887,12 @@ function timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
         arrivalMin:setMaximum(59,false)
         arrivalMin:setValue(v[1],false)
         arrivalMin:onChange(function(value)
-            timetable.updateArrDep(lineID, stationID, k, 1, value)
+			timetable.updateArrDep(lineID, stationID, k, 1, value)
             timetableChanged = true
-            timetableGUI.initStationTable()
-            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+			clearConstraintWindowLaterHACK = function()
+				timetableGUI.initStationTable()
+				timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+			end 
         end)
 
         local minSecSeparator = api.gui.comp.TextView.new(":")
@@ -905,8 +904,10 @@ function timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
         arrivalSec:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 2, value)
             timetableChanged = true
-            timetableGUI.initStationTable()
-            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            clearConstraintWindowLaterHACK = function()
+				timetableGUI.initStationTable()
+				timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+			end 
         end)
 
         local deleteLabel = api.gui.comp.TextView.new("     X")
@@ -914,19 +915,16 @@ function timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
         local deleteButton = api.gui.comp.Button.new(deleteLabel, true)
         deleteButton:onClick(function()
             deleteButton:setEnabled(false)
-            timetableGUI.popUpYesNo("Delete?", function()
-                timetable.removeCondition(lineID, stationID, "ArrDep", k)
-                timetableChanged = true
-                timetableGUI.initStationTable()
-                timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-                menu.constraintTable:invokeLater( function ()
-                    timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
-                end)
-
-                deleteButton:setEnabled(true)
-            end, function()
-                deleteButton:setEnabled(true)
+            
+            timetable.removeCondition(lineID, stationID, "ArrDep", k)
+            timetableChanged = true
+            timetableGUI.initStationTable()
+            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            menu.constraintTable:invokeLater( function ()
+                timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
             end)
+
+            deleteButton:setEnabled(true)
         end)
 
         local linetable = api.gui.comp.Table.new(5, 'NONE')
@@ -953,8 +951,10 @@ function timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
         departureMin:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 3, value)
             timetableChanged = true
-            timetableGUI.initStationTable()
-            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            clearConstraintWindowLaterHACK = function()
+				timetableGUI.initStationTable()
+				timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+			end 
         end)
 
         local minSecSeparator = api.gui.comp.TextView.new(":")
@@ -966,8 +966,10 @@ function timetableGUI.makeArrDepConstraintsTable(lineID, stationID)
         departureSec:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 4, value)
             timetableChanged = true
-            timetableGUI.initStationTable()
-            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            clearConstraintWindowLaterHACK = function()
+				timetableGUI.initStationTable()
+				timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+			end 
         end)
 
         local insertLabel = api.gui.comp.TextView.new("     +")
@@ -1054,9 +1056,11 @@ function timetableGUI.makeDebounceWindow(lineID, stationID, debounceType)
     debounceMin:onChange(function(value)
         timetable.updateDebounce(lineID, stationID,  1, value, debounceType)
         timetableChanged = true
-        timetableGUI.initStationTable()
-        timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-        updateAutoDebounce()
+		updateAutoDebounce()
+		clearConstraintWindowLaterHACK = function()
+			timetableGUI.initStationTable()
+			timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+		end
     end)
 
     if condition and condition[1] then
@@ -1071,9 +1075,11 @@ function timetableGUI.makeDebounceWindow(lineID, stationID, debounceType)
     debounceSec:onChange(function(value)
         timetable.updateDebounce(lineID, stationID, 2, value, debounceType)
         timetableChanged = true
-        timetableGUI.initStationTable()
-        timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-        updateAutoDebounce()
+		updateAutoDebounce()
+        clearConstraintWindowLaterHACK = function()
+			timetableGUI.initStationTable()
+			timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+		end
     end)
 
     if condition and condition[2] then
@@ -1155,20 +1161,41 @@ end
 
 function timetableGUI.timetableCoroutine()
     local lastUpdate = -1
+	local currentProcessingTime = 0
 
     while true do
+		currentProcessingTime = timetableHelper.getTime()
         -- only run once a second to avoid unnecessary cpu usage
-        while timetableHelper.getTime() - lastUpdate < 1 do
+        while currentProcessingTime - lastUpdate < 1 do
             coroutine.yield()
+			currentProcessingTime = timetableHelper.getTime()
         end
-        lastUpdate = timetableHelper.getTime()
+		
+        lastUpdate = currentProcessingTime
+		print("Timetable ping " .. os.date('%M:%S', lastUpdate))
+		print("Lua is using " .. tostring(math.floor(api.util.getLuaUsedMemory()/(1024*1024))).."MB of memory")
         local vehicleLineMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
         
         for line, vehicles in pairs(vehicleLineMap) do
-            timetable.updateFor(line, vehicles)
-            coroutine.yield()
+		    if timetable.hasTimetable(line) then
+				for _, vehicle in pairs(vehicles) do
+				    local vehicleState = timetableHelper.getVehicleInfo(vehicle)
+			        if vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
+                        timetable.updateForVehicle(vehicle, line, vehicles, vehicleState)
+                    end
+					coroutine.yield()
+		        end
+			else
+				for _, vehicle in pairs(vehicles) do
+					if timetableHelper.getVehicleInfo(vehicle).state == api.type.enum.TransportVehicleState.AT_TERMINAL and not timetableHelper.getVehicleInfo(vehicle).autoDeparture then
+						timetableHelper.restartAutoVehicleDeparture(vehicle)
+					end
+					coroutine.yield()
+				end
+			end
+			coroutine.yield()
         end
-        -- timetable.cleanTimetable()
+        timetable.cleanTimetable()
         coroutine.yield()
     end
 end
@@ -1216,9 +1243,9 @@ function data()
                     print("Timetables failed to resume " .. coroutineStatus .. " coroutine.")
                 end
             end
-
+			
             -- TODO: check if needed
-            state.timetable = timetable.getTimetableObject()
+            -- state.timetable = timetable.getTimetableObject()
 
             local lines = game.interface.getLines()
             for _, line in pairs(lines) do
@@ -1230,6 +1257,11 @@ function data()
             if timetableChanged then
                 game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject())
                 timetableChanged = false
+            end
+			
+			if clearConstraintWindowLaterHACK then
+                clearConstraintWindowLaterHACK()
+                clearConstraintWindowLaterHACK = nil
             end
 
             if not clockstate then
@@ -1256,13 +1288,26 @@ function data()
 				gameInfoLayout:addItem(line)
 				gameInfoLayout:addItem(icon)
 				gameInfoLayout:addItem(clockstate)
+				clockstate:setTooltip("Current Time")
+				clockstate:onStep(function ()
+					clockstate:setText(os.date('%M:%S', timetableHelper.getTime()))
+				end)
             end
 
-            local time = timetableHelper.getTime()
+			--local currentTime = os.date('%M:%S', timetableHelper.getTime())
+			--clockstate:setText(os.date('%M:%S', timetableHelper.getTime()))
+			--local currentTime = timetableHelper.getTime()
+			--if clockstate and currentTime and currentTime - clockGUIUpdate > 0 then
+				
+			--	print("Clock update")
+			--	clockGUIUpdate = currentTime
+			--end
 
-            if clockstate and time then
-                clockstate:setText(os.date('%M:%S', time))
-            end
+			--
+            --if clockstate and currentTime then
+            --    
+            --end
+			collectgarbage()
         end
     }
 end

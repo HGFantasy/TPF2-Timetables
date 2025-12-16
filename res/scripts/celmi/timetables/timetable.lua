@@ -38,7 +38,6 @@ ArrDep = {
 local timetable = { }
 local timetableObject = { }
 
-
 function timetable.getTimetableObject()
     return timetableObject
 end
@@ -61,8 +60,8 @@ function timetable.setTimetableObject(t)
         end
 
         timetableObject = t
-        -- print("timetable after loading and processing:")
-        -- print(dump(timetableObject))
+        --print("timetable after loading and processing:")
+        --print(dump(timetableObject))
     end
 end
 
@@ -215,6 +214,7 @@ function timetable.updateArrDep(line, station, indexKey, indexValue, value)
        timetableObject[line].stations[station].conditions.ArrDep[indexKey][indexValue] = value
         return 0
     else
+		print("FAILED TO FIND DEPARTURE INDEX")
         return -2
     end
 end
@@ -267,32 +267,19 @@ function timetable.hasTimetable(line)
     end
 end
 
-function timetable.updateFor(line, vehicles)
-    for _, vehicle in pairs(vehicles) do
-        local vehicleInfo = timetableHelper.getVehicleInfo(vehicle)
-        if vehicleInfo then
-            if timetable.hasTimetable(line) then
-                timetable.updateForVehicle(vehicle, vehicleInfo, line, vehicles)
-            elseif not vehicleInfo.autoDeparture then
-                timetableHelper.restartAutoVehicleDeparture(vehicle)
-            end
-        end
-    end
-end
-
-function timetable.updateForVehicle(vehicle, vehicleInfo, line, vehicles)
-    if timetableHelper.isVehicleAtTerminal(vehicleInfo) then
-        local stop = vehicleInfo.stopIndex + 1
+function timetable.updateForVehicle(vehicle, line, vehicles, vehicleState)
+    --if timetableHelper.isVehicleAtTerminal(timetableHelper.getVehicleInfo(vehicle)) then
+        local stop = vehicleState.stopIndex + 1
 
         if timetable.LineAndStationHasTimetable(line, stop) then
-            timetable.departIfReady(vehicle, vehicleInfo, vehicles, line, stop)
-        elseif not vehicleInfo.autoDeparture then
+            timetable.departIfReady(vehicle, vehicles, line, stop, vehicleState)
+        elseif not vehicleState.autoDeparture then
             timetableHelper.restartAutoVehicleDeparture(vehicle)
         end
 
-    elseif not vehicleInfo.autoDeparture then
-        timetableHelper.restartAutoVehicleDeparture(vehicle)
-    end
+    --elseif not timetableHelper.getVehicleInfo(vehicle).autoDeparture then
+    --    timetableHelper.restartAutoVehicleDeparture(vehicle)
+    --end
 end
 
 function timetable.LineAndStationHasTimetable(line, stop)
@@ -302,11 +289,11 @@ function timetable.LineAndStationHasTimetable(line, stop)
     return not (timetableObject[line].stations[stop].conditions.type == "None")
 end
 
-function timetable.departIfReady(vehicle, vehicleInfo, vehicles, line, stop)
-    if vehicleInfo.autoDeparture then
+function timetable.departIfReady(vehicle, vehicles, line, stop, vehicleState)
+    if vehicleState.autoDeparture then
         timetableHelper.stopAutoVehicleDeparture(vehicle)
-    elseif vehicleInfo.doorsOpen then
-        local arrivalTime = math.floor(vehicleInfo.doorsTime / 1000000)
+    elseif vehicleState.doorsOpen then
+        local arrivalTime = math.floor(vehicleState.doorsTime / 1000000)
         if timetable.readyToDepart(vehicle, arrivalTime, vehicles, line, stop) then
             if timetable.getForceDepartureEnabled(line) then
                 timetableHelper.departVehicle(vehicle)
@@ -318,11 +305,11 @@ function timetable.departIfReady(vehicle, vehicleInfo, vehicles, line, stop)
 end
 
 function timetable.readyToDepart(vehicle, arrivalTime, vehicles, line, stop)
-    if not timetableObject[line] then return end
-    if not timetableObject[line].stations then return end
-    if not timetableObject[line].stations[stop] then return end
-    if not timetableObject[line].stations[stop].conditions then return end
-    if not timetableObject[line].stations[stop].conditions.type then return end
+    if not timetableObject[line] then return true end
+    if not timetableObject[line].stations then return true end
+    if not timetableObject[line].stations[stop] then return true end
+    if not timetableObject[line].stations[stop].conditions then return true end
+    if not timetableObject[line].stations[stop].conditions.type then return true end
     local conditionType = timetableObject[line].stations[stop].conditions.type
 
     if not timetableObject[line].stations[stop].vehiclesWaiting then
@@ -430,7 +417,12 @@ function timetable.readyToDepartArrDep(vehicle, doorsTime, vehicles, currentTime
         }
     end
 
-    return timetable.afterDepartureTime(departureTime, currentTime)
+    if timetable.afterDepartureTime(departureTime, currentTime) then
+        vehiclesWaiting[vehicle] = nil
+        return true
+    end
+
+    return false
 end
 
 function timetable.setForceDepartureEnabled(line, value)
@@ -442,9 +434,10 @@ end
 function timetable.getForceDepartureEnabled(line)
     if timetableObject[line] then
         -- if true or nil
-        if timetableObject[line].forceDeparture ~= true then
-            return false
+        if timetableObject[line].forceDeparture == nil then
+			timetableObject[line].forceDeparture = false
         end
+		return timetableObject[line].forceDeparture
     end
 
     return false
@@ -648,9 +641,13 @@ function timetable.getNextSlot(slots, arrivalTime, vehiclesWaiting)
         for vehicle, waitingVehicle in pairs(vehiclesWaiting) do
             local departureTime = waitingVehicle.departureTime
             local slot = waitingVehicle.slot
+			local time = timetableHelper.getTime()
             -- Remove waitingVehicle if it is in invalid format
             if not (departureTime and slot) then
                 vehiclesWaiting[vehicle] = nil
+		    elseif timetable.afterDepartureTime(departureTime, time) then
+                vehiclesWaiting[vehicle] = nil
+				print("PRUNING OLD WAITING VEHICLE SLOT")
             elseif arrivalTime <= departureTime then
                 waitingSlots[vehicle] = slot
             else
@@ -667,7 +664,9 @@ function timetable.getNextSlot(slots, arrivalTime, vehiclesWaiting)
 
         local slot = slots[normalisedIndex]
         local slotAvailable = true
-        if timetable.arrayContainsSlot(slot, waitingSlots) then
+		if timetable.getWaitTime(slot, arrivalTime) <= 0 then
+            slotAvailable = false
+        elseif timetable.arrayContainsSlot(slot, waitingSlots) then
             slotAvailable = false
             -- if the nearest slot is still waiting, then all departedSlots can be removed
             for vehicle, _ in pairs(departedSlots) do
