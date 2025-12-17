@@ -38,6 +38,34 @@ ArrDep = {
 local timetable = { }
 local timetableObject = { }
 
+-- Cache for lines with timetables enabled
+local timetableLinesCache = {}
+
+-- Export cache for external access (e.g., GUI)
+timetable.getCachedTimetableLines = function()
+    return timetableLinesCache
+end
+
+-- Initialize cache of lines with timetables enabled
+timetable.initializeTimetableLinesCache = function()
+    timetableLinesCache = {}
+    for line, lineInfo in pairs(timetableObject) do
+        if timetable.hasTimetable(line) then
+            timetableLinesCache[line] = true
+        end
+    end
+end
+
+-- Add a line to the timetable cache
+timetable.addLineToTimetableCache = function(line)
+    timetableLinesCache[line] = true
+end
+
+-- Remove a line from the timetable cache
+timetable.removeLineFromTimetableCache = function(line)
+    timetableLinesCache[line] = nil
+end
+
 function timetable.getTimetableObject()
     return timetableObject
 end
@@ -565,15 +593,13 @@ function timetable.setHasTimetable(line, bool)
         timetableObject[line] = {stations = {} , hasTimetable = bool}
     end
 
-    -- Directly update the timetable lines cache
-    if _G.timetableLinesCache ~= nil then
-        if bool then
-            -- Add line to cache when timetable is enabled
-            _G.timetableLinesCache[line] = true
-        else
-            -- Remove line from cache when timetable is disabled
-            _G.timetableLinesCache[line] = nil
-        end
+    -- Directly update the timetable lines cache using the new API
+    if bool then
+        -- Add line to cache when timetable is enabled
+        timetable.addLineToTimetableCache(line)
+    else
+        -- Remove line from cache when timetable is disabled
+        timetable.removeLineFromTimetableCache(line)
     end
 
     return bool

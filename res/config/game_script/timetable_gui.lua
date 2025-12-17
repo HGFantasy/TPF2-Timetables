@@ -9,10 +9,6 @@ local menu = {window = nil, lineTableItems = {}, popUp = nil}
 
 local timetableGUI = {}
 
--- Cache for lines with timetables enabled
-timetableLinesCache = {}
-local lastCacheUpdate = 0
-
 local UIState = {
     currentlySelectedLineTableIndex = nil ,
     currentlySelectedStationIndex = nil,
@@ -1163,16 +1159,6 @@ function timetableGUI.popUpYesNo(title, onYes, onNo)
     end)
 end
 
--- Initialize cache of lines with timetables enabled (for first load)
-function timetableGUI.initializeTimetableLinesCache()
-    timetableLinesCache = {}
-    for line, lineInfo in pairs(timetable.getTimetableObject()) do
-        if timetable.hasTimetable(line) then
-            timetableLinesCache[line] = true
-        end
-    end
-end
-
 function timetableGUI.timetableCoroutine()
     local lastUpdate = -1
 	local currentProcessingTime = 0
@@ -1190,7 +1176,7 @@ function timetableGUI.timetableCoroutine()
 		print("Lua is using " .. tostring(math.floor(api.util.getLuaUsedMemory()/(1024*1024))).."MB of memory")
 
         -- Only process lines that have timetables enabled
-        for line, _ in pairs(timetableLinesCache) do
+        for line, _ in pairs(timetable.getCachedTimetableLines()) do
             if api.engine.entityExists(line) then
                 local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(line)
                 for _, vehicle in pairs(vehicles) do
@@ -1235,7 +1221,7 @@ function data()
 
             timetable.setTimetableObject(state.timetable)
             -- Initialize cache on first load
-            timetableGUI.initializeTimetableLinesCache()
+            timetable.initializeTimetableLinesCache()
         end,
 
         update = function()
