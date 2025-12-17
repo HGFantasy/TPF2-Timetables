@@ -564,6 +564,18 @@ function timetable.setHasTimetable(line, bool)
     else
         timetableObject[line] = {stations = {} , hasTimetable = bool}
     end
+
+    -- Directly update the timetable lines cache
+    if _G.timetableLinesCache ~= nil then
+        if bool then
+            -- Add line to cache when timetable is enabled
+            _G.timetableLinesCache[line] = true
+        else
+            -- Remove line from cache when timetable is disabled
+            _G.timetableLinesCache[line] = nil
+        end
+    end
+
     return bool
 end
 

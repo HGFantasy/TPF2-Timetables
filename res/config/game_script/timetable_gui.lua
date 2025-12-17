@@ -9,6 +9,10 @@ local menu = {window = nil, lineTableItems = {}, popUp = nil}
 
 local timetableGUI = {}
 
+-- Cache for lines with timetables enabled
+timetableLinesCache = {}
+local lastCacheUpdate = 0
+
 local UIState = {
     currentlySelectedLineTableIndex = nil ,
     currentlySelectedStationIndex = nil,
@@ -1159,43 +1163,45 @@ function timetableGUI.popUpYesNo(title, onYes, onNo)
     end)
 end
 
+-- Initialize cache of lines with timetables enabled (for first load)
+function timetableGUI.initializeTimetableLinesCache()
+    timetableLinesCache = {}
+    for line, lineInfo in pairs(timetable.getTimetableObject()) do
+        if timetable.hasTimetable(line) then
+            timetableLinesCache[line] = true
+        end
+    end
+end
+
 function timetableGUI.timetableCoroutine()
     local lastUpdate = -1
 	local currentProcessingTime = 0
 
     while true do
-        print("coroutine is executed")
 		currentProcessingTime = timetableHelper.getTime()
         -- only run once a second to avoid unnecessary cpu usage
         while currentProcessingTime - lastUpdate < 1 do
             coroutine.yield()
 			currentProcessingTime = timetableHelper.getTime()
         end
-		
+
         lastUpdate = currentProcessingTime
 		print("Timetable ping " .. os.date('%M:%S', lastUpdate))
 		print("Lua is using " .. tostring(math.floor(api.util.getLuaUsedMemory()/(1024*1024))).."MB of memory")
-        local vehicleLineMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
-        
-        for line, vehicles in pairs(vehicleLineMap) do
-		    if timetable.hasTimetable(line) then
-				for _, vehicle in pairs(vehicles) do
-				    local vehicleState = timetableHelper.getVehicleInfo(vehicle)
-			        if vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
+
+        -- Only process lines that have timetables enabled
+        for line, _ in pairs(timetableLinesCache) do
+            if api.engine.entityExists(line) then
+                local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(line)
+                for _, vehicle in pairs(vehicles) do
+                    local vehicleState = timetableHelper.getVehicleInfo(vehicle)
+                    if vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
                         timetable.updateForVehicle(vehicle, line, vehicles, vehicleState)
                     end
-					coroutine.yield()
-		        end
-			else
-				for _, vehicle in pairs(vehicles) do
-					if timetableHelper.getVehicleInfo(vehicle).state == api.type.enum.TransportVehicleState.AT_TERMINAL and not timetableHelper.getVehicleInfo(vehicle).autoDeparture then
-						timetableHelper.restartAutoVehicleDeparture(vehicle)
-					end
-					coroutine.yield()
-				end
-			end
-			coroutine.yield()
+                end
+            end
         end
+
         timetable.cleanTimetable()
         coroutine.yield()
     end
@@ -1226,8 +1232,10 @@ function data()
         load = function(loadedState)
             -- load happens once for engine thread and repeatedly for gui thread
             state = loadedState or {timetable = {}}
-            
+
             timetable.setTimetableObject(state.timetable)
+            -- Initialize cache on first load
+            timetableGUI.initializeTimetableLinesCache()
         end,
 
         update = function()
@@ -1239,7 +1247,6 @@ function data()
 
             -- Resume the coroutine once per update call
             local coroutineStatus = coroutine.status(co)
-            print("Timetables coroutine status: " .. coroutineStatus)
             if coroutineStatus == "suspended" then
                 local success, errorMsg = coroutine.resume(co)
                 if not success then
@@ -1249,6 +1256,7 @@ function data()
                     print("Recreated timetable coroutine after error")
                 end
             else
+                print("Timetables coroutine status: " .. coroutineStatus)
                 if coroutineStatus ~= "running" then
                     -- Recreate the coroutine if it's in an unexpected state
                     co = coroutine.create(timetableGUI.timetableCoroutine)
