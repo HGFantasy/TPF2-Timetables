@@ -1,4 +1,8 @@
-# TPF2-Timetables
+# THIS MOD IS IN ALPHA TESTING, PLEASE BE AWARE THAT INKNOW ERRORS MIGHT OCCUR!
+
+
+
+# TPF2-Timetables V2
 
 ## Overview
 
@@ -86,7 +90,7 @@ The mod gracefully falls back to native TPF2 APIs if CommonAPI2 is not available
 
 ## Project Status
 
-This mod is actively maintained and developed. It is a fork of the original [TPF2-Timetables mod](https://github.com/IncredibleHannes/TPF2-Timetables) by [@IncredibleHannes](https://github.com/IncredibleHannes), with contributions from [@Gregory365](https://github.com/Gregory365), [@quittung](https://github.com/quittung), [@H3lyx](https://github.com/H3lyx), and others.
+This mod is actively maintained and developed. It is a fork of the original [TPF2-Timetables mod](https://github.com/IncredibleHannes/TPF2-Timetables) by [@IncredibleHannes](https://github.com/IncredibleHannes), with contributions from [@Gregory365](https://github.com/Gregory365), [@quittung](https://github.com/quittung), [@H3lyx](https://github.com/H3lyx), [@HGFantasy] (https://github.com/HGFantasy/TPF2-Timetables) and others.
 
 The current version includes significant enhancements:
 - Full CommonAPI2 integration
