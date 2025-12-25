@@ -8,71 +8,79 @@ local commonapi2_logging_api = nil
 local commonapi2_localization_api = nil
 local commonapi2_error_api = nil
 
--- Initialize CommonAPI2 (assumed to always be available)
-if commonapi ~= nil and type(commonapi) == "table" then
-    commonapi2_available = true
-    -- Access events if available
-    if commonapi._events ~= nil then
-        commonapi2_events = commonapi._events
-    end
-    -- Access command API if available
-    if commonapi.cmd ~= nil then
-        commonapi2_cmd = commonapi.cmd
-    elseif commonapi.commands ~= nil then
-        commonapi2_cmd = commonapi.commands
-    end
-    
-    -- Access logging API if available
-    if commonapi.log then
-        commonapi2_logging_api = commonapi.log
-    elseif commonapi.logging then
-        commonapi2_logging_api = commonapi.logging
-    elseif commonapi.logger then
-        commonapi2_logging_api = commonapi.logger
-    end
-    
-    -- Access localization API if available
-    if commonapi.localization then
-        commonapi2_localization_api = commonapi.localization
-    elseif commonapi.locale then
-        commonapi2_localization_api = commonapi.locale
-    elseif commonapi.i18n then
-        commonapi2_localization_api = commonapi.i18n
-    end
-    
-    -- Access error reporting API if available
-    if commonapi.error then
-        commonapi2_error_api = commonapi.error
-    elseif commonapi.exception then
-        commonapi2_error_api = commonapi.exception
-    elseif commonapi.errors then
-        commonapi2_error_api = commonapi.errors
-    end
-    
-    -- Log feature detection (only once at startup)
-    local features = {}
-    if commonapi2_events then table.insert(features, "events") end
-    if commonapi2_cmd then table.insert(features, "commands") end
-    if commonapi.entityExists then table.insert(features, "entityExists") end
-    if commonapi.getComponent then table.insert(features, "getComponent") end
-    if commonapi.getComponents then table.insert(features, "getComponents (batch)") end
-    if commonapi.system then table.insert(features, "system") end
-    if commonapi.getWorld then table.insert(features, "getWorld") end
-    if commonapi.getEntity then table.insert(features, "getEntity") end
-    if commonapi.getLines then table.insert(features, "getLines") end
-    if commonapi2_logging_api then table.insert(features, "logging") end
-    if commonapi2_localization_api then table.insert(features, "localization") end
-    if commonapi2_error_api then table.insert(features, "errorReporting") end
-    if commonapi2_performance_api then table.insert(features, "performance") end
-    
-    if #features > 0 then
-        -- Use print for initial startup message (logging not initialized yet)
-        print("Timetables: CommonAPI2 available with features: " .. table.concat(features, ", "))
+-- Initialize CommonAPI2 detection with debug logging
+print("Timetables: Checking for CommonAPI2...")
+print("Timetables: commonapi type: " .. type(commonapi))
+if commonapi ~= nil then
+    print("Timetables: commonapi exists, checking if table...")
+    if type(commonapi) == "table" then
+        print("Timetables: commonapi is a table, CommonAPI2 detected!")
+        commonapi2_available = true
+        -- Access events if available
+        if commonapi._events ~= nil then
+            commonapi2_events = commonapi._events
+        end
+        -- Access command API if available
+        if commonapi.cmd ~= nil then
+            commonapi2_cmd = commonapi.cmd
+        elseif commonapi.commands ~= nil then
+            commonapi2_cmd = commonapi.commands
+        end
+        
+        -- Access logging API if available
+        if commonapi.log then
+            commonapi2_logging_api = commonapi.log
+        elseif commonapi.logging then
+            commonapi2_logging_api = commonapi.logging
+        elseif commonapi.logger then
+            commonapi2_logging_api = commonapi.logger
+        end
+        
+        -- Access localization API if available
+        if commonapi.localization then
+            commonapi2_localization_api = commonapi.localization
+        elseif commonapi.locale then
+            commonapi2_localization_api = commonapi.locale
+        elseif commonapi.i18n then
+            commonapi2_localization_api = commonapi.i18n
+        end
+        
+        -- Access error reporting API if available
+        if commonapi.error then
+            commonapi2_error_api = commonapi.error
+        elseif commonapi.exception then
+            commonapi2_error_api = commonapi.exception
+        elseif commonapi.errors then
+            commonapi2_error_api = commonapi.errors
+        end
+        
+        -- Log feature detection (only once at startup)
+        local features = {}
+        if commonapi2_events then table.insert(features, "events") end
+        if commonapi2_cmd then table.insert(features, "commands") end
+        if commonapi.entityExists then table.insert(features, "entityExists") end
+        if commonapi.getComponent then table.insert(features, "getComponent") end
+        if commonapi.getComponents then table.insert(features, "getComponents (batch)") end
+        if commonapi.system then table.insert(features, "system") end
+        if commonapi.getWorld then table.insert(features, "getWorld") end
+        if commonapi.getEntity then table.insert(features, "getEntity") end
+        if commonapi.getLines then table.insert(features, "getLines") end
+        if commonapi2_logging_api then table.insert(features, "logging") end
+        if commonapi2_localization_api then table.insert(features, "localization") end
+        if commonapi2_error_api then table.insert(features, "errorReporting") end
+        if commonapi2_performance_api then table.insert(features, "performance") end
+        
+        if #features > 0 then
+            -- Use print for initial startup message (logging not initialized yet)
+            print("Timetables: CommonAPI2 available with features: " .. table.concat(features, ", "))
+        else
+            print("Timetables: CommonAPI2 detected but no known features found")
+        end
     else
-        print("Timetables: CommonAPI2 detected but no known features found")
+        print("Timetables: commonapi exists but is not a table (type: " .. type(commonapi) .. "), using native API fallback")
     end
 else
-    print("Timetables: CommonAPI2 not available, using native API fallback")
+    print("Timetables: CommonAPI2 not available (commonapi is nil), using native API fallback")
 end
 
 local UIStrings = {
@@ -547,8 +555,55 @@ function timetableHelper.invalidateStationPositionCache(stationID)
     end
 end
 
+-- Re-check CommonAPI2 availability at runtime (callable from game_script context)
+function timetableHelper.recheckCommonAPI2()
+    if commonapi ~= nil and type(commonapi) == "table" then
+        print("Timetables: Re-checking CommonAPI2 at runtime - detected!")
+        if not commonapi2_available then
+            commonapi2_available = true
+            -- Re-initialize API references
+            if commonapi._events ~= nil then
+                commonapi2_events = commonapi._events
+            end
+            if commonapi.cmd ~= nil then
+                commonapi2_cmd = commonapi.cmd
+            elseif commonapi.commands ~= nil then
+                commonapi2_cmd = commonapi.commands
+            end
+            if commonapi.log then
+                commonapi2_logging_api = commonapi.log
+            elseif commonapi.logging then
+                commonapi2_logging_api = commonapi.logging
+            elseif commonapi.logger then
+                commonapi2_logging_api = commonapi.logger
+            end
+            if commonapi.localization then
+                commonapi2_localization_api = commonapi.localization
+            elseif commonapi.locale then
+                commonapi2_localization_api = commonapi.locale
+            elseif commonapi.i18n then
+                commonapi2_localization_api = commonapi.i18n
+            end
+            if commonapi.error then
+                commonapi2_error_api = commonapi.error
+            elseif commonapi.exception then
+                commonapi2_error_api = commonapi.exception
+            elseif commonapi.errors then
+                commonapi2_error_api = commonapi.errors
+            end
+            print("Timetables: CommonAPI2 re-initialized successfully at runtime")
+        end
+        return true
+    end
+    return false
+end
+
 -- Check if CommonAPI2 is available
 function timetableHelper.isCommonAPI2Available()
+    -- Try to re-check if not already available (for runtime initialization)
+    if not commonapi2_available then
+        timetableHelper.recheckCommonAPI2()
+    end
     return commonapi2_available
 end
 
@@ -907,7 +962,7 @@ function timetableHelper.log(level, message, ...)
     
     -- Format message with arguments if provided
     local formattedMessage = message
-    if ... then
+    if select('#', ...) > 0 then
         formattedMessage = string.format(message, ...)
     end
     
@@ -960,11 +1015,15 @@ end
 function timetableHelper.formatLocalizedString(key, ...)
     if not key then return "" end
     
+    -- Capture varargs into a table
+    local args = {...}
+    local arg_count = select('#', ...)
+    
     -- Try CommonAPI2 localization API if available
     if commonapi2_available and commonapi2_localization_api then
         if commonapi2_localization_api.format then
             local success, result = pcall(function()
-                return commonapi2_localization_api.format(key, ...)
+                return commonapi2_localization_api.format(key, unpack(args))
             end)
             if success and result then
                 return result
@@ -972,8 +1031,8 @@ function timetableHelper.formatLocalizedString(key, ...)
         elseif commonapi2_localization_api.translate then
             local success, result = pcall(function()
                 local translated = commonapi2_localization_api.translate(key)
-                if ... then
-                    return string.format(translated, ...)
+                if arg_count > 0 then
+                    return string.format(translated, unpack(args))
                 end
                 return translated
             end)
@@ -984,8 +1043,8 @@ function timetableHelper.formatLocalizedString(key, ...)
     end
     
     -- Fallback to manual formatting
-    if ... then
-        return string.format(key, ...)
+    if arg_count > 0 then
+        return string.format(key, unpack(args))
     end
     return key
 end

@@ -31,10 +31,29 @@ local timetableChanged = false
 local newTimetableState = {}
 local clearConstraintWindowLaterHACK = nil
 
+-- Debug logging helper (simplified - just using print)
+
 -- CommonAPI2 persistence for GUI state
 local commonapi2_available = false
 local commonapi2_persistence_api = nil
 local GUI_STATE_VERSION = 1
+
+-- Re-check CommonAPI2 availability from game_script context (where it should be available)
+if timetableHelper and timetableHelper.recheckCommonAPI2 then
+    print("Timetables: Re-checking CommonAPI2 from game_script context")
+    timetableHelper.recheckCommonAPI2()
+end
+
+-- Re-check CommonAPI2 persistence APIs for other modules
+pcall(function()
+    if timetable and timetable.recheckPersistenceAPI then
+        timetable.recheckPersistenceAPI()
+    end
+    local persistenceManager = require "celmi/timetables/persistence_manager"
+    if persistenceManager and persistenceManager.recheckPersistenceAPI then
+        persistenceManager.recheckPersistenceAPI()
+    end
+end)
 
 -- Check for CommonAPI2 and persistence API
 if commonapi ~= nil and type(commonapi) == "table" then
@@ -382,11 +401,23 @@ function timetableGUI.dbUpdateDepartures()
         
         -- Line name
         local lineName = timetableHelper.getLineName(dep.lineID)
-        local lineNameTV = api.gui.comp.TextView.new(lineName)
+        -- Ensure lineName is a string (handle case where it might be a table)
+        if type(lineName) == "table" then
+            lineName = tostring(lineName) or "Unknown"
+        elseif lineName == nil then
+            lineName = "Unknown"
+        end
+        local lineNameTV = api.gui.comp.TextView.new(tostring(lineName))
         
         -- Destination
         local destination = timetable.getDestinationForLineAtStation(dep.lineID, dep.stopNr)
-        local destinationTV = api.gui.comp.TextView.new(destination)
+        -- Ensure destination is a string (handle case where it might be a table)
+        if type(destination) == "table" then
+            destination = tostring(destination) or "Unknown"
+        elseif destination == nil then
+            destination = "Unknown"
+        end
+        local destinationTV = api.gui.comp.TextView.new(tostring(destination))
         
         -- Scheduled time
         local depMin, depSec = timetable.secToMin(dep.departureTime % 3600)
@@ -631,7 +662,11 @@ function timetableGUI.statsUpdateStatistics()
         -- Station name
         local stationID = timetableHelper.getStationID(selectedLineID, stationNumber)
         local stationName = stationID ~= -1 and timetableHelper.getStationName(stationID) or "Unknown"
-        local stationNameTV = api.gui.comp.TextView.new(stationName)
+        -- Ensure stationName is a string (handle case where it might be a table)
+        if type(stationName) == "table" then
+            stationName = tostring(stationName) or "Unknown"
+        end
+        local stationNameTV = api.gui.comp.TextView.new(tostring(stationName))
         
         -- On-time percentage
         local onTimePercent = string.format("%.1f%%", stats.onTimePercentage)
@@ -739,6 +774,10 @@ function timetableGUI.statsUpdateStatistics()
         if entry.line == selectedLineID then
             local stationID = timetableHelper.getStationID(entry.line, entry.station)
             local stationName = stationID ~= -1 and timetableHelper.getStationName(stationID) or "Unknown"
+            -- Ensure stationName is a string (handle case where it might be a table)
+            if type(stationName) == "table" then
+                stationName = tostring(stationName) or "Unknown"
+            end
             
             local delayMin = math.floor(entry.delay / 60)
             local delaySec = math.floor(entry.delay % 60)
@@ -778,7 +817,8 @@ end
 -- abbreviated prefix: st
 
 function timetableGUI.initStationTab()
-    if menu.stationTabScrollArea then UIState.floatingLayoutStationTab:removeItem(menu.scrollArea) end
+    -- Note: We create fresh layouts now, so no cleanup needed
+    -- Previous cleanup code removed - causes RemoveChild errors with fresh layouts
 
     --left table
     local stationOverview = api.gui.comp.TextView.new('StationOverview')
@@ -870,7 +910,14 @@ function timetableGUI.stFillLines(tabIndex)
             lineColourTV:setName("timetable-linecolour-" .. timetableHelper.getLineColour(tonumber(lineID)))
             lineColourTV:setStyleClassList({"timetable-linecolour"})
 
-            local lineName = timetableHelper.getLineName(lineID) .. " - Stop " .. stopNr
+            local lineName = timetableHelper.getLineName(lineID)
+            -- Ensure lineName is a string (handle case where it might be a table)
+            if type(lineName) == "table" then
+                lineName = tostring(lineName) or "Unknown"
+            elseif lineName == nil then
+                lineName = "Unknown"
+            end
+            lineName = tostring(lineName) .. " - Stop " .. stopNr
             local lineNameTV = api.gui.comp.TextView.new(lineName)
 
             local lineNameBox = api.gui.comp.Table.new(2, 'NONE')
@@ -974,85 +1021,87 @@ function timetableGUI.initConstraintTable()
     menu.scrollAreaConstraint:setContent(menu.constraintTable)
 end
 function timetableGUI.showLineMenu()
+    print("DEBUG: showLineMenu called, menu.window=" .. tostring(menu.window))
     if menu.window ~= nil then
+        print("DEBUG: Window exists, refreshing and showing")
         timetableGUI.initLineTable()
         return menu.window:setVisible(true, true)
     end
-    if not timetableHelper.getGUIElementById('timetable.floatingLayout') then
-        local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
-        floatingLayout:setId("timetable.floatingLayout")
-    end
-    -- new folting layout to arrange all members
-
-    UIState.boxlayout2 = timetableHelper.getGUIElementById('timetable.floatingLayout')
+    print("DEBUG: Creating new window")
+    -- Always create a fresh layout for new windows to avoid ownership conflicts
+    -- No need to set ID since we're storing it directly in UIState.boxlayout2
+    UIState.boxlayout2 = api.gui.layout.FloatingLayout.new(0,1)
     UIState.boxlayout2:setGravity(-1,-1)
+    
+    -- Reset menu state since we're creating fresh UI elements
+    menu.scrollArea = nil
+    menu.lineHeader = nil
+    menu.stationScrollArea = nil
+    menu.scrollAreaConstraint = nil
+    menu.stationTabScrollArea = nil
+    menu.stationTabLinesScrollArea = nil
 
+    -- Setting up Line Tab - create wrapper and set layout FIRST (empty), then add items
+    print("DEBUG: Creating tab widget")
+    menu.tabWidget = api.gui.comp.TabWidget.new("NORTH")
+    print("DEBUG: Creating wrapper component")
+    local wrapper = api.gui.comp.Component.new("wrapper")
+    print("DEBUG: Setting empty layout on wrapper first")
+    wrapper:setLayout(UIState.boxlayout2)
+    print("DEBUG: Adding wrapper to tab widget")
+    menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.lines), wrapper)
+    print("DEBUG: Tab added, now initializing tables (which will add items to layout)")
+    
+    print("DEBUG: Initializing line table")
     timetableGUI.initLineTable()
+    print("DEBUG: Initializing station table")
     timetableGUI.initStationTable()
+    print("DEBUG: Initializing constraint table")
     timetableGUI.initConstraintTable()
     
     -- Add export/import all buttons to line table header
+    print("DEBUG: About to call addExportImportButtons")
     timetableGUI.addExportImportButtons()
-
-    -- Setting up Line Tab
-    menu.tabWidget = api.gui.comp.TabWidget.new("NORTH")
-    local wrapper = api.gui.comp.Component.new("wrapper")
-    wrapper:setLayout(UIState.boxlayout2 )
-    menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.lines), wrapper)
+    print("DEBUG: addExportImportButtons completed")
 
 
-    if not timetableHelper.getGUIElementById('timetable.floatingLayoutStationTab') then
-        local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
-        floatingLayout:setId("timetable.floatingLayoutStationTab")
-    end
-
-    UIState.floatingLayoutStationTab = timetableHelper.getGUIElementById('timetable.floatingLayoutStationTab')
+    print("DEBUG: Setting up Station Tab")
+    -- Create fresh layout for station tab
+    UIState.floatingLayoutStationTab = api.gui.layout.FloatingLayout.new(0,1)
     UIState.floatingLayoutStationTab:setGravity(-1,-1)
-
-    timetableGUI.initStationTab()
     local wrapper2 = api.gui.comp.Component.new("wrapper2")
     wrapper2:setLayout(UIState.floatingLayoutStationTab)
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.stations),wrapper2)
+    timetableGUI.initStationTab()
 
     -- Add Departure Board tab
-    if not timetableHelper.getGUIElementById('timetable.floatingLayoutDepartureBoard') then
-        local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
-        floatingLayout:setId("timetable.floatingLayoutDepartureBoard")
-    end
-    UIState.floatingLayoutDepartureBoard = timetableHelper.getGUIElementById('timetable.floatingLayoutDepartureBoard')
+    print("DEBUG: Setting up Departure Board Tab")
+    UIState.floatingLayoutDepartureBoard = api.gui.layout.FloatingLayout.new(0,1)
     UIState.floatingLayoutDepartureBoard:setGravity(-1,-1)
-    
-    timetableGUI.initDepartureBoardTab()
     local wrapper3 = api.gui.comp.Component.new("wrapper3")
     wrapper3:setLayout(UIState.floatingLayoutDepartureBoard)
     menu.tabWidget:addTab(api.gui.comp.TextView.new("Departure Board"), wrapper3)
+    timetableGUI.initDepartureBoardTab()
 
     -- Add Statistics tab
-    if not timetableHelper.getGUIElementById('timetable.floatingLayoutStatistics') then
-        local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
-        floatingLayout:setId("timetable.floatingLayoutStatistics")
-    end
-    UIState.floatingLayoutStatistics = timetableHelper.getGUIElementById('timetable.floatingLayoutStatistics')
+    print("DEBUG: Setting up Statistics Tab")
+    UIState.floatingLayoutStatistics = api.gui.layout.FloatingLayout.new(0,1)
     UIState.floatingLayoutStatistics:setGravity(-1,-1)
-    
-    timetableGUI.initStatisticsTab()
     local wrapper4 = api.gui.comp.Component.new("wrapper4")
     wrapper4:setLayout(UIState.floatingLayoutStatistics)
     menu.tabWidget:addTab(api.gui.comp.TextView.new("Statistics"), wrapper4)
+    timetableGUI.initStatisticsTab()
     
     -- Settings tab
-    if not timetableHelper.getGUIElementById('timetable.floatingLayoutSettings') then
-        local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
-        floatingLayout:setId("timetable.floatingLayoutSettings")
-    end
-    UIState.floatingLayoutSettings = timetableHelper.getGUIElementById('timetable.floatingLayoutSettings')
+    print("DEBUG: Setting up Settings Tab")
+    UIState.floatingLayoutSettings = api.gui.layout.FloatingLayout.new(0,1)
     UIState.floatingLayoutSettings:setGravity(-1,-1)
-    
-    timetableGUI.initSettingsTab()
-    
     local wrapper5 = api.gui.comp.Component.new("SettingsWrapper")
     wrapper5:setLayout(UIState.floatingLayoutSettings)
     menu.tabWidget:addTab(api.gui.comp.TextView.new("Settings"), wrapper5)
+    print("DEBUG: Initializing settings tab")
+    timetableGUI.initSettingsTab()
+    print("DEBUG: Settings tab initialized")
     
     menu.tabWidget:onCurrentChanged(function(i)
         if i == 1 then
@@ -1077,6 +1126,7 @@ function timetableGUI.showLineMenu()
     end)
 
     -- create final window
+    print("DEBUG: Creating window")
     menu.window = api.gui.comp.Window.new(UIStrings.timetables, menu.tabWidget)
     menu.window:addHideOnCloseHandler()
     menu.window:setMovable(true)
@@ -1087,6 +1137,9 @@ function timetableGUI.showLineMenu()
     menu.window:onClose(function()
         menu.lineTableItems = {}
     end)
+    print("DEBUG: Window created, about to set visible")
+    menu.window:setVisible(true, true)
+    print("DEBUG: Window set visible, function ending")
 
 end
 
@@ -1273,7 +1326,8 @@ function timetableGUI.addExportImportButtons()
     
     local exportImportRow = api.gui.comp.Table.new(2, 'NONE')
     exportImportRow:addRow({exportAllButton, importAllButton})
-    menu.lineHeader:addRow({exportImportRow})
+    -- menu.lineHeader has 6 columns, so we need to add 6 items (exportImportRow + 5 empty spacers)
+    menu.lineHeader:addRow({exportImportRow, api.gui.comp.Component.new("Spacer"), api.gui.comp.Component.new("Spacer"), api.gui.comp.Component.new("Spacer"), api.gui.comp.Component.new("Spacer"), api.gui.comp.Component.new("Spacer")})
 end
 
 -- Show export dialog with data that can be copied
@@ -1974,7 +2028,14 @@ function timetableGUI.fillStationTable(index, bool)
         stationNumber:setMinimumSize(api.gui.util.Size.new(30, 30))
 
 
-        local stationName = api.gui.comp.TextView.new(station.name)
+        -- Ensure station.name is a string
+        local stationNameStr = station.name
+        if type(stationNameStr) == "table" then
+            stationNameStr = tostring(stationNameStr) or "Unknown"
+        elseif stationNameStr == nil then
+            stationNameStr = "Unknown"
+        end
+        local stationName = api.gui.comp.TextView.new(tostring(stationNameStr))
         stationName:setName("stationName")
 
         local jurneyTime
@@ -1994,7 +2055,13 @@ function timetableGUI.fillStationTable(index, bool)
 
         local conditionType = timetable.getConditionType(lineID, k)
         local condStr = timetableHelper.conditionToString(timetable.getConditions(lineID, k, conditionType), lineID, conditionType)
-        local conditionString = api.gui.comp.TextView.new(condStr)
+        -- Ensure condStr is a string (handle case where it might be a table)
+        if type(condStr) == "table" then
+            condStr = tostring(condStr) or ""
+        elseif condStr == nil then
+            condStr = ""
+        end
+        local conditionString = api.gui.comp.TextView.new(tostring(condStr))
         conditionString:setName("conditionString")
         conditionString:setStyleClassList(local_style)
 
@@ -2029,18 +2096,34 @@ function timetableGUI.fillStationTable(index, bool)
         conditionRow:setColWidth(0, 360)
         conditionRow:setColWidth(1, 30)
         conditionRow:setColWidth(2, 30)
-        local rowItems = {conditionString}
+        -- Build row items array (must have exactly 3 items)
+        local rowItems = {}
+        -- First item: conditionString (always present)
+        if conditionString then
+            table.insert(rowItems, conditionString)
+        else
+            table.insert(rowItems, api.gui.comp.TextView.new(""))
+        end
+        -- Second item: warningIndicator or empty
         if warningIndicator then
             table.insert(rowItems, warningIndicator)
         else
             table.insert(rowItems, api.gui.comp.TextView.new(""))
         end
+        -- Third item: skipIndicator or empty
         if skipIndicator then
             table.insert(rowItems, skipIndicator)
         else
             table.insert(rowItems, api.gui.comp.TextView.new(""))
         end
-        conditionRow:addRow(rowItems)
+        -- Verify we have exactly 3 items before adding (safety check)
+        if #rowItems == 3 then
+            conditionRow:addRow(rowItems)
+        else
+            print("ERROR: conditionRow expected 3 items but got " .. #rowItems .. ", using fallback")
+            -- Fallback: create minimal valid row
+            conditionRow:addRow({api.gui.comp.TextView.new(""), api.gui.comp.TextView.new(""), api.gui.comp.TextView.new("")})
+        end
 
         menu.stationTable:addRow({stationNumber,stationNameTable, menu.lineImage[k], conditionRow})
     end
@@ -2217,14 +2300,26 @@ function timetableGUI.formatValidationTooltip(validation)
     local tooltipLines = {"Validation Warnings:"}
     for _, warning in ipairs(validation.warnings) do
         local severityIcon = warning.severity == "high" and "🔴" or (warning.severity == "medium" and "🟡" or "🟢")
-        table.insert(tooltipLines, severityIcon .. " " .. warning.message)
+        local messageStr = warning.message
+        if type(messageStr) == "table" then
+            messageStr = tostring(messageStr)
+        elseif messageStr == nil then
+            messageStr = ""
+        end
+        table.insert(tooltipLines, severityIcon .. " " .. tostring(messageStr))
     end
     
     if #validation.suggestions > 0 then
         table.insert(tooltipLines, "")
         table.insert(tooltipLines, "Suggestions:")
         for _, suggestion in ipairs(validation.suggestions) do
-            table.insert(tooltipLines, "• " .. suggestion)
+            local suggestionStr = suggestion
+            if type(suggestion) == "table" then
+                suggestionStr = tostring(suggestion)
+            elseif suggestion == nil then
+                suggestionStr = ""
+            end
+            table.insert(tooltipLines, "• " .. tostring(suggestionStr))
         end
     end
     
@@ -3010,7 +3105,7 @@ function timetableGUI.makeTimePeriodEditor(lineID, stationID)
             end
         end)
         
-        local periodRowTable = api.gui.comp.Table.new(8, 'NONE')
+        local periodRowTable = api.gui.comp.Table.new(9, 'NONE')
         periodRowTable:setColWidth(0, 150)
         periodRowTable:setColWidth(1, 50)
         periodRowTable:setColWidth(2, 10)
@@ -3019,6 +3114,7 @@ function timetableGUI.makeTimePeriodEditor(lineID, stationID)
         periodRowTable:setColWidth(5, 10)
         periodRowTable:setColWidth(6, 50)
         periodRowTable:setColWidth(7, 100)
+        periodRowTable:setColWidth(8, 100)
         periodRowTable:addRow({
             periodLabel,
             startMinSpin,
@@ -3546,10 +3642,10 @@ function timetableGUI.initSettingsTab()
                     end
                 end)
             elseif setting.type == "spin" then
-                control = api.gui.comp.SpinBox.new()
-                control:setValue(currentValue or 0)
-                control:setMin(setting.min or 0)
-                control:setMax(setting.max or 1000)
+                control = api.gui.comp.DoubleSpinBox.new()
+                control:setValue(currentValue or 0, false)
+                control:setMinimum(setting.min or 0, false)
+                control:setMaximum(setting.max or 1000, false)
                 control:onChange(function(value)
                     local valid, err = settings.validate(setting.key, value)
                     if valid then
@@ -3558,10 +3654,10 @@ function timetableGUI.initSettingsTab()
                 end)
             elseif setting.type == "double" then
                 control = api.gui.comp.DoubleSpinBox.new()
-                control:setValue(currentValue or 0.0)
-                control:setMin(setting.min or 0.0)
-                control:setMax(setting.max or 1.0)
-                control:setStep(setting.step or 0.1)
+                control:setValue(currentValue or 0.0, false)
+                control:setMinimum(setting.min or 0.0, false)
+                control:setMaximum(setting.max or 1.0, false)
+                control:setStep(setting.step or 0.1, false)
                 control:onChange(function(value)
                     local valid, err = settings.validate(setting.key, value)
                     if valid then
@@ -3602,7 +3698,7 @@ function timetableGUI.initSettingsTab()
     end
     
     -- Settings management buttons
-    local buttonRow = api.gui.comp.Table.new(4, 'NONE')
+    local buttons = {}
     
     -- Save Settings button (only show if CommonAPI2 is available)
     if settings.isPersistent() then
@@ -3615,7 +3711,7 @@ function timetableGUI.initSettingsTab()
                 timetableGUI.popUpMessage("Failed to save settings: " .. (err or "Unknown error"), function() end)
             end
         end)
-        buttonRow:addRow({saveButton})
+        table.insert(buttons, saveButton)
         
         -- Load Settings button
         local loadButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("Load Settings"), true)
@@ -3626,7 +3722,7 @@ function timetableGUI.initSettingsTab()
                 timetableGUI.popUpMessage("Settings loaded successfully", function() end)
             end, function() end)
         end)
-        buttonRow:addRow({loadButton})
+        table.insert(buttons, loadButton)
     end
     
     -- Reset to defaults button
@@ -3638,7 +3734,11 @@ function timetableGUI.initSettingsTab()
             timetableGUI.popUpMessage("Settings reset to defaults", function() end)
         end, function() end)
     end)
-    buttonRow:addRow({resetButton})
+    table.insert(buttons, resetButton)
+    
+    -- Create button row table with correct number of columns
+    local buttonRow = api.gui.comp.Table.new(#buttons, 'NONE')
+    buttonRow:addRow(buttons)
     
     contentTable:addRow({buttonRow})
     
@@ -4165,10 +4265,19 @@ function data()
 
                 local button = gui.button_create("gameInfo.timetables.button", buttonLabel)
                 button:onClick(function ()
-                    local err, msg = pcall(timetableGUI.showLineMenu)
-                    if not err then
+                    print("DEBUG: Button clicked, calling showLineMenu")
+                    local success, result = pcall(timetableGUI.showLineMenu)
+                    print(string.format("DEBUG: pcall returned success=%s, result=%s", tostring(success), tostring(result)))
+                    if not success then
                         menu.window = nil
-                        print(msg)
+                        print("DEBUG: Error in showLineMenu: " .. tostring(result))
+                    else
+                        print("DEBUG: showLineMenu completed successfully")
+                        if menu.window then
+                            print("DEBUG: menu.window exists, visible=" .. tostring(menu.window:isVisible()))
+                        else
+                            print("DEBUG: menu.window is nil after showLineMenu")
+                        end
                     end
                 end)
                 game.gui.boxLayout_addItem("gameInfo.layout", button.id)

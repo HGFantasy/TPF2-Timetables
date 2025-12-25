@@ -3872,8 +3872,37 @@ function timetable.loadFromPersistence()
     end
 end
 
+-- Re-check CommonAPI2 persistence API at runtime
+function timetable.recheckPersistenceAPI()
+    if commonapi ~= nil and type(commonapi) == "table" then
+        if not commonapi2_available then
+            commonapi2_available = true
+        end
+        if not commonapi2_persistence_api then
+            if commonapi.persistence then
+                commonapi2_persistence_api = commonapi.persistence
+            elseif commonapi.data then
+                commonapi2_persistence_api = commonapi.data
+            elseif commonapi.storage then
+                commonapi2_persistence_api = commonapi.storage
+            elseif commonapi.settings then
+                commonapi2_persistence_api = commonapi.settings
+            end
+            if commonapi2_persistence_api then
+                print("Timetables: Re-initialized timetable persistence API at runtime")
+            end
+        end
+        return commonapi2_available and commonapi2_persistence_api ~= nil
+    end
+    return false
+end
+
 -- Check if timetable persistence is available
 function timetable.isPersistenceAvailable()
+    -- Try to re-check if not already available (for runtime initialization)
+    if not commonapi2_available or not commonapi2_persistence_api then
+        timetable.recheckPersistenceAPI()
+    end
     return commonapi2_available and commonapi2_persistence_api ~= nil
 end
 

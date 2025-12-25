@@ -177,8 +177,37 @@ function persistenceManager.saveModule(moduleName)
     end
 end
 
+-- Re-check CommonAPI2 persistence API at runtime
+function persistenceManager.recheckPersistenceAPI()
+    if commonapi ~= nil and type(commonapi) == "table" then
+        if not commonapi2_available then
+            commonapi2_available = true
+        end
+        if not commonapi2_persistence_api then
+            if commonapi.persistence then
+                commonapi2_persistence_api = commonapi.persistence
+            elseif commonapi.data then
+                commonapi2_persistence_api = commonapi.data
+            elseif commonapi.storage then
+                commonapi2_persistence_api = commonapi.storage
+            elseif commonapi.settings then
+                commonapi2_persistence_api = commonapi.settings
+            end
+            if commonapi2_persistence_api then
+                print("Timetables: Re-initialized persistence_manager API at runtime")
+            end
+        end
+        return commonapi2_available and commonapi2_persistence_api ~= nil
+    end
+    return false
+end
+
 -- Check if persistence is available
 function persistenceManager.isAvailable()
+    -- Try to re-check if not already available (for runtime initialization)
+    if not commonapi2_available or not commonapi2_persistence_api then
+        persistenceManager.recheckPersistenceAPI()
+    end
     return commonapi2_available and commonapi2_persistence_api ~= nil
 end
 
