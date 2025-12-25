@@ -1,86 +1,376 @@
-# Documentation
+# Technical Documentation
+
 ## Introduction
-This is the technical documentation for the TPF2-Timetables mod. It is intended for developers that want to understand or modify the code. Normal users should instead read the [README](README.md).
+
+This is the technical documentation for the TPF2-Timetables mod. It is intended for developers who want to understand or modify the code. Normal users should read the [README](README.md) instead.
 
 ---
 
-## Overview
-### GUI
-The GUI is implemented in the `timetable_gui.lua` file. It is responsible for creating all the menus and for handling the user input. It manages a timeteble object, that specifies if and when a vehicle should stop at a statio.
+## Architecture Overview
 
-### Control Logic
-The control logic is implemented in the `timetable.lua` file. It reads the timetable object and decides wether a particular vehicle should wait at that time. 
+### Module Structure
 
-The central function is `timetable.waitingRequired()`, which is called once every ingame second for each vehicle that is currently in a station.
+The mod is organized into several modules:
 
-### Game API Interaction
-The mod communicates with the game through helper functions contained in the `timetable_helper.lua` file. This includes getting the current time or information about vehicles and stations, and telling vehicles to start or stop.
+#### Core Modules
+
+- **`timetable.lua`**: Main timetable control logic. Handles slot assignment, delay recovery, train/platform assignments, and batch operations.
+- **`timetable_helper.lua`**: Game API interaction layer. Provides wrappers for game APIs, CommonAPI2 integration, event handling, and utility functions.
+- **`timetable_gui.lua`**: GUI implementation. Creates menus, handles user input, and displays timetable information.
+
+#### Supporting Modules
+
+- **`delay_tracker.lua`**: Delay tracking, statistics, alerts, and advanced analytics
+- **`settings.lua`**: Centralized configuration management with CommonAPI2 persistence
+- **`persistence_manager.lua`**: Unified persistence coordination for all mod data
+- **`guard.lua`**: Safety and validation utilities
+- **`route_finder.lua`**: Route finding, network analysis, and automatic timetable generation
+
+#### Feature Modules
+
+- **`timetable_templates.lua`**: Template system for saving and reusing timetable patterns
+- **`timetable_validator.lua`**: Conflict detection and timetable validation
+- **`line_coordinator.lua`**: Multi-line coordination for synchronized transfers
+- **`timetable_scheduler.lua`**: Seasonal and event-based timetable variations
+- **`timetable_visualizer.lua`**: Data export for visualization and analysis
+- **`network_graph_cache.lua`**: Network graph caching and invalidation
+
+### CommonAPI2 Integration
+
+The mod extensively uses CommonAPI2 when available, with graceful fallback to native APIs:
+
+- **Persistence**: Automatic save/load via `commonapi.persistence`
+- **Events**: Event-driven updates via `commonapi.events`
+- **Commands**: Optimized command batching via `commonapi.cmd`
+- **Components**: Batch component operations via `commonapi.getComponents`
+- **Logging**: Structured logging via `commonapi.log`
+- **Localization**: String/number/time formatting via `commonapi.localization`
+- **Error Reporting**: Enhanced error reporting via `commonapi.error`
+- **Performance**: Metrics reporting via `commonapi.performance`
+
+### Data Flow
+
+```
+Game Events → timetable_helper (event listeners) → timetable (update logic) → delay_tracker (statistics)
+                                                                              ↓
+                                                                    persistence_manager (save/load)
+```
 
 ---
 
-## Wait Logic
-Wether or not a train needs to wait depends on a number of factors: 
-- the type of timetable constraint 
-- the last departure time
-- the current time
+## Core Functionality
 
-Those factors can be different for each stop on each line. For every stop, the script tracks the last recorded departure and a list of vehicles currently waiting along with their intended departure time.
+### Timetable Control Logic
 
-When a vehicle is in a station, the function `timetable.waitingRequired()` is repeatedly called. If a timetable constraint exists and the vehicle is not not registered in the waiting list, it assumes the vehicle just arrived and assigns a departure time according to the rules layed out below.  
+The control logic is implemented in `timetable.lua`. It reads the timetable object and decides whether a particular vehicle should wait at a station.
+
+#### Main Functions
+
+- **`timetable.updateForVehicle(vehicle, line, vehicles, vehicleState, currentTime)`**: Called periodically for each vehicle. Checks if the vehicle should wait based on timetable constraints.
+- **`timetable.readyToDepart(vehicle, arrivalTime, vehicles, line, stop, currentTime)`**: Determines if a vehicle is ready to depart from a station.
+- **`timetable.readyToDepartArrDep(...)`**: Handles ArrDep constraint logic.
+- **`timetable.readyToDepartDebounce(...)`**: Handles Unbunch/AutoUnbunch constraint logic.
+- **`timetable.departIfReady(...)`**: Checks if vehicle should depart and triggers departure if ready.
+
+### Wait Logic
+
+Whether a vehicle needs to wait depends on several factors:
+- The type of timetable constraint (ArrDep, Unbunch, AutoUnbunch)
+- The last departure time for that line/station
+- The current time
+- Vehicle assignments (if train assignment is enabled)
+- Delay tolerance settings
+- Delay recovery mode
+
+For every stop, the script tracks:
+- The last recorded departure
+- A list of vehicles currently waiting with their intended departure times
+- Train assignments (vehicle-to-slot bindings)
+- Platform assignments (vehicle-to-platform bindings)
+
+When a vehicle arrives at a station, `timetable.updateForVehicle()` is called. If a timetable constraint exists and the vehicle is not registered in the waiting list, it assumes the vehicle just arrived and assigns a departure time.
 
 ### Arrival/Departure Constraint
-With Arr/Dep constraints the user specifies a number of arrival/departure slots. The departure time specifies whan a vehicle may depart, while the arrival time specifies the earliest arrival time after which a vehicle is considered for that slot. Starting at the last departure, a vehicle will be assigned the last slot that has an arrival time in the past.
 
-The current behavior is that a vehicle will always try to use the first departure slot after the last departure *as long as* the arrival time of the next slot hasn't already been reached.
+With ArrDep constraints, users specify arrival/departure time slots. The system:
 
-#### Example
-For example, the slots for a stop might look like this:
+1. Finds the nearest available slot based on arrival time
+2. Checks if the slot is already assigned to another vehicle
+3. If train assignment exists, uses the assigned slot (if valid)
+4. Assigns the vehicle to the slot and calculates departure time
+5. Applies delay recovery strategies if the vehicle is delayed
+6. Checks maximum delay tolerance and skips to next slot if exceeded
 
-Arrival | Departure
---- | ---
-03:00 | 05:00
-13:00 | 15:00
-23:00 | 25:00
-33:00 | 35:00
-43:00 | 45:00
-53:00 | 55:00
-
-Let's say the last departure was at 15:00, the next train is due at 23:00 and arrives with a delay of 1 minute at 24:00. The next slot after the last departure only accepts arrivals after 33:00, which is still in the future. So the departure at 25:00 is assigned. 
-
-The same is true if the train arrived one minute early. In fact, a train will alway use the next slot or a later one, even if it arrives only seconds after the last train.
-
-Let's now look at delays approaching the service frequency of 10 minutes. At a delay of 9 minutes it will arrive at 32:00. The slot departing at 25:00 is still satisfies both conditions because the next arrival time of 33:00 is still in the future. It will depart as soon as loading has completed.
-
-After a delay of 10 minutes, the next arrival time of 33:00 is no longer in the future. It therefor switches to that slot and waits until 35:00 to depart. 
-
-#### Future Plans
-This behavior is not optimal, as it will lead to vehicles trying to catch up to the original timetable even with unrecoverable delays. However the previous behavior wasn't ideal either, because hard to control when vehicle would give up on their original slot, sometimes leading to vehicles bunching up.
-
-I am thinking about adding the ability to specify a maximum tolerable delay, which will be the threshold after which the train will wait for the next slot. For now my advice is:
-- Add a bit of buffer times in bigger stations
-- Add lots of buffer time at the end of lines
-- Look at the arrival time as the earliest acceptable time to be considered for a departure slot, not as the intended arrival time
-
+**Slot Selection Algorithm:**
+- Uses `timetable.getNextSlot()` to find the nearest available slot
+- Considers vehicles already waiting to avoid conflicts
+- Respects train assignments if configured
+- Handles slot conflicts by finding the next consecutive available slot
 
 ### Unbunch Constraints
-The objective of Unbunch constraints is to guarantee a minimum separation of trains on a line. It is useful when having fixed departure times is less important than maintaining a regular spacing.
 
-The departure time assigned is always the last departure plus the time span set in the constraint editor. 
+Unbunch constraints guarantee a minimum separation between vehicles on a line. The departure time assigned is always the last departure plus the time span set in the constraint.
+
+**AutoUnbunch** automatically calculates the separation based on the line's frequency, with configurable buffer time for delays.
+
+### Delay Recovery
+
+Multiple delay recovery modes are available:
+
+- **`catch_up`**: Try to return to schedule (default behavior)
+- **`skip_to_next`**: Abandon current slot, use next available
+- **`hold_at_terminus`**: Wait longer at end stations to realign
+- **`gradual_recovery`**: Slowly return to schedule over multiple stops
+- **`skip_stops`**: Skip intermediate stops to catch up
+- **`reset_at_terminus`**: Reset schedule at terminus stations
+
+### Maximum Delay Tolerance
+
+When enabled, if a vehicle's delay exceeds the configured threshold, it will skip the current slot and move to the next available slot. This prevents vehicles from trying to catch up to unrecoverable delays.
+
+### Train Assignment
+
+Vehicles can be assigned to specific timetable slots:
+
+- **`timetable.assignTrainToSlot(line, stop, vehicle, slotIndex)`**: Binds a vehicle to a specific slot
+- **`timetable.removeTrainAssignment(line, stop, vehicle)`**: Removes the assignment
+- **`timetable.getTrainAssignment(line, stop, vehicle)`**: Gets assignment info
+- **`timetable.isTrainAssigned(line, stop, vehicle)`**: Checks if assigned
+
+When a vehicle has an assignment, `getNextSlot()` prioritizes the assigned slot if it's still valid.
+
+### Platform Assignment
+
+Vehicles can be assigned to specific platforms at stations:
+
+- **`timetable.assignVehicleToPlatform(line, stop, vehicle, platform)`**: Assigns vehicle to platform
+- **`timetable.getPlatformAssignment(line, stop, vehicle)`**: Gets platform assignment
+- **`timetable.getAvailablePlatforms(line, stop, maxPlatforms)`**: Lists available platforms
 
 ---
 
 ## API Interaction
+
 ### Getting Data
-####  [ TransportVehicle Data](https://transportfever2.com/wiki/api/modules/api.type.html#TransportVehicle)
+
+The mod uses `timetable_helper.lua` for all game API interactions:
+
+- **Vehicle Information**: `timetableHelper.getVehicleInfo(vehicle)`, `timetableHelper.getLineVehicles(line, time)`
+- **Station Information**: `timetableHelper.getStationID(line, stop)`, `timetableHelper.getStationName(stationID)`
+- **Line Information**: `timetableHelper.getLineInfo(line)`, `timetableHelper.getAllStations(line)`
+- **Component Access**: `timetableHelper.getComponent(entity, componentType, time)` (with CommonAPI2 batch support)
 
 ### Sending Commands
-Commands are first made using ```api.cmd.make.[...]()``` and then sent with ```api.cmd.sendCommand([...])```.
 
-#### [api.cmd.make.setUserStopped](https://transportfever2.com/wiki/api/modules/api.cmd.html#make.setUserStopped)
-Stops a vehicle in the same way the user can by pressing "Stop" in the vehicle window.
+Commands are created and sent through CommonAPI2 when available:
 
-#### [api.cmd.make.setVehicleManualDeparture](https://transportfever2.com/wiki/api/modules/api.cmd.html#make.setVehicleManualDeparture)
-Inhibits a vehicle from departing a terminal under any circumstance.
+```lua
+-- Via CommonAPI2 (preferred)
+local cmd = commonapi2_cmd.make.setVehicleShouldDepart(vehicle)
+commonapi2_cmd.send(cmd)
 
-#### [api.cmd.make.setVehicleShouldDepart](https://transportfever2.com/wiki/api/modules/api.cmd.html#make.setVehicleShouldDepart)
-Commands a vehicle to depart immediately.
+-- Fallback to native API
+local cmd = api.cmd.make.setVehicleShouldDepart(vehicle)
+api.cmd.sendCommand(cmd)
+```
+
+**Key Commands:**
+- **`setUserStopped`**: Stops a vehicle (same as user pressing "Stop")
+- **`setVehicleManualDeparture`**: Prevents vehicle from departing automatically
+- **`setVehicleShouldDepart`**: Commands vehicle to depart immediately
+
+### CommonAPI2 Integration
+
+The mod uses CommonAPI2 for:
+
+- **Batch Operations**: `timetableHelper.batchGetLineComponents()`, `timetableHelper.batchGetVehicleComponents()`
+- **Event Subscriptions**: `timetableHelper.addEventListener()` for line/vehicle/station changes
+- **Persistence**: Automatic save/load via `persistenceManager`
+- **Caching**: Intelligent cache invalidation based on events
+- **Performance**: Metrics reporting and resource management
+
+---
+
+## New Features
+
+### Timetable Templates
+
+The `timetable_templates.lua` module provides:
+
+- **Template Creation**: Save common timetable patterns (frequency-based, ArrDep slots, unbunch)
+- **Template Application**: Apply templates to lines/stations with variable substitution
+- **Template Management**: Create, update, delete, and list templates
+- **Persistence**: Templates are saved via CommonAPI2
+
+### Timetable Validation
+
+The `timetable_validator.lua` module provides:
+
+- **Conflict Detection**: Finds overlapping slots, duplicate assignments, platform conflicts
+- **Validation**: Checks for impossible travel times, invalid slot structures
+- **Warnings**: Identifies potential issues before they cause problems
+- **Line/Station Validation**: Validate individual stations or entire lines
+
+### Line Coordination
+
+The `line_coordinator.lua` module provides:
+
+- **Transfer Points**: Define connections between lines at stations
+- **Synchronization**: Automatically adjust departure times for coordinated transfers
+- **Connection Times**: Configurable minimum connection times
+- **Multi-Line Support**: Coordinate multiple lines at transfer hubs
+
+### Timetable Scheduler
+
+The `timetable_scheduler.lua` module provides:
+
+- **Time-Based Schedules**: Different timetables for peak hours, off-peak, etc.
+- **Day-Based Schedules**: Weekday vs weekend variations
+- **Seasonal Schedules**: Different timetables for different seasons (when API available)
+- **Event Schedules**: Manually activated special event timetables
+
+### Delay Tracking & Analytics
+
+The `delay_tracker.lua` module provides:
+
+- **Delay Recording**: Tracks arrival and departure delays
+- **Statistics**: On-time percentage, average delays, min/max delays
+- **Alert System**: Notifications when delays exceed thresholds
+- **Advanced Analytics**:
+  - Delay trends over time
+  - Punctuality heatmaps (by time of day)
+  - Service frequency analysis
+  - Capacity utilization metrics
+  - Delay pattern detection
+
+### Timetable Visualizer
+
+The `timetable_visualizer.lua` module provides:
+
+- **Timeline Data**: Vehicle positions and schedules over time
+- **Station Occupancy**: Vehicle counts per time slot
+- **Conflict Visualization**: Identifies and reports scheduling conflicts
+- **Export**: Text export for debugging and analysis
+
+---
+
+## Persistence System
+
+All mod data is persisted via `persistence_manager.lua`:
+
+- **Timetable Data**: All timetable constraints, assignments, and settings
+- **Delay Statistics**: Historical delay data and statistics
+- **Templates**: Saved timetable templates
+- **Settings**: Global mod settings
+- **Coordination Data**: Multi-line transfer points
+- **Scheduler Data**: Seasonal/event schedule definitions
+
+The persistence system:
+- Uses CommonAPI2 when available
+- Falls back to native APIs if needed
+- Handles data versioning and migration
+- Auto-saves periodically
+- Loads on game start
+
+---
+
+## Performance Optimizations
+
+The mod includes several performance optimizations:
+
+- **Caching**: Entity existence, component access, sorted slots, vehicle state
+- **Batch Operations**: Group multiple API calls into single operations
+- **Event-Driven Updates**: Only update when changes occur (via CommonAPI2 events)
+- **Lazy Loading**: Load data only when needed
+- **Cache Invalidation**: Smart cache clearing based on events and memory pressure
+
+---
+
+## Error Handling
+
+The mod uses comprehensive error handling:
+
+- **Safe API Calls**: All CommonAPI2 calls wrapped in `pcall`
+- **Graceful Degradation**: Falls back to native APIs if CommonAPI2 unavailable
+- **Error Reporting**: Uses CommonAPI2 error reporting when available
+- **Logging**: Structured logging with multiple levels (debug, info, warn, error)
+
+---
+
+## Data Structures
+
+### Timetable Object
+
+```lua
+timetableObject = {
+    [lineID] = {
+        hasTimetable = true,
+        frequency = 900,  -- seconds
+        stations = {
+            [stopNumber] = {
+                stationID = 123,
+                conditions = {
+                    type = "ArrDep" | "debounce" | "auto_debounce" | "None",
+                    ArrDep = {{arrMin, arrSec, depMin, depSec}, ...},
+                    debounce = interval  -- seconds
+                },
+                vehiclesWaiting = {
+                    [vehicleID] = {
+                        arrivalTime = 1800,
+                        slot = {30, 0, 35, 0},
+                        departureTime = 2100
+                    }
+                },
+                trainAssignments = {
+                    [vehicleID] = {
+                        slotIndex = 1,
+                        slot = {30, 0, 35, 0}
+                    }
+                },
+                platformAssignments = {
+                    [vehicleID] = 1  -- platform number
+                },
+                maxDelayTolerance = 300,  -- seconds
+                maxDelayToleranceEnabled = true,
+                delayRecoveryMode = "catch_up"
+            }
+        }
+    }
+}
+```
+
+---
+
+## Extension Points
+
+Developers can extend the mod by:
+
+1. **Adding New Modules**: Create new Lua modules following the existing patterns
+2. **Event Listeners**: Subscribe to timetable events via `timetableHelper.addEventListener()`
+3. **Custom Recovery Modes**: Add new delay recovery strategies
+4. **Template Types**: Extend the template system with new pattern types
+5. **Analytics**: Add custom analytics functions to `delay_tracker.lua`
+
+---
+
+## Testing
+
+The mod includes test files in the `tests/` directory:
+
+- `timetable_tests.lua`: Core timetable logic tests
+- `timetable_helper_tests.lua`: Helper function tests
+- `test_nextDeparture.lua`: Slot selection algorithm tests
+
+Run tests to verify functionality after making changes.
+
+---
+
+## Future Considerations
+
+Potential areas for future enhancement:
+
+- GUI improvements for new features
+- Additional visualization options
+- Enhanced demand-based timetable generation
+- More sophisticated delay recovery algorithms
+- Integration with other TPF2 mods

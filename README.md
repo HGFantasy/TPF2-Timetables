@@ -1,46 +1,144 @@
 # TPF2-Timetables
+
 ## Overview
-This is a mod for Transport Fever 2 that adds a timetable system to the game. It allows you to specify when a vehicle should stop at a station and when it should depart. This is useful for creating realistic schedules for your trains, buses and other vehicles.
 
-For every stop you can choose between three modes:
-- **None**: The vehicle will use the vanilla logic, i.e. it will stop, wait for loading to complete, sometimes wait a bit extra for unbunching and then depart.
-- **Arrival/Departure**: The vehicle will stop at the station and depart only at the next specified departure time. It chooses the last slot with a departure time after the last recorded departure and an arrival time in the past.
-- **Unbunch**: The vehicle will depart no sooner than the specified time span after the last recorded departure for that line and station.
-- **AutoUnbunch**: The vehicle departures will be spaced out by the frequency of the line. The associate time is the "give" in the system and allows for delays in and between stations. I would recommend a minimum value of 1 minute but this should be increased to 2 or even 3 minutes for less frequent or more delayed routes.
+This is a mod for Transport Fever 2 that adds a comprehensive timetable system to the game. It allows you to specify when vehicles should stop at stations and when they should depart, enabling realistic schedules for trains, buses, trams, and other vehicles.
 
-More technical information can be found in the [documentation](documentation.md).
+## Features
 
-## The Current State of the Project
-This mod has already been released on the [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=2408373260) by it's original Creator, [@IncredibleHannes](https://github.com/IncredibleHannes/TPF2-Timetables). Unfortunately that release is from March 2021, and a few things have changed in the game since then. 
+### Core Timetable Types
 
-Additionally, changes have been made to the mod by several people that were never released. Those people include me [@Gregory365](https://github.com/Gregory365/TPF2-Timetables), [@quittung](https://github.com/quittung/TPF2-Timetables), [@IncredibleHannes](https://github.com/IncredibleHannes/TPF2-Timetables), and others.
+For every stop on a line, you can choose between four modes:
 
-My aim with this fork is to compile the changes that make sense, rework the code to improve reliability and maintainability, add documentation and eventually release a new version of the mod on the Steam Workshop.
+- **None**: The vehicle uses vanilla game logic - stops, waits for loading to complete, and departs.
+- **Arrival/Departure**: Specify exact arrival and departure time slots. Vehicles choose the nearest available slot and wait until the scheduled departure time.
+- **Unbunch**: Enforces a minimum time span between departures at a station to prevent vehicles from bunching up.
+- **AutoUnbunch**: Automatically spaces out vehicles by the line's frequency, with configurable buffer time for delays.
 
-## New Features this version brings
-- Support for multiple vehicles at the same station (no two vehicles can pick the same time slot)
-- Use nearest arrival time to calculate a vehicles intended departure time
-- Remember the state of vehicles after a save-load cycle so not to always depart immediately
-- **AutoUnbunch**: space out vehicles by the frequency of the line
-- Improved performance
-- Updated timetable colours to support Spring Update line colours
-- Minimum wait time is supported
-- Maximum wait time can be support (enable first is mod settings)
+### Advanced Features
 
-## Breaking changes
-- Timetables can be transfered from the old version (but not back again)
-- Use *nearest* arrival time instead of *next* arrival time to calculate a vehicles intended departure time
+- **Train Assignment**: Bind specific vehicles to specific timetable slots for precise control
+- **Platform Assignment**: Assign vehicles to specific platforms at stations
+- **Maximum Delay Tolerance**: Configure threshold after which vehicles skip to next available slot
+- **Delay Recovery Strategies**: Multiple recovery modes (catch up, skip to next, hold at terminus, gradual recovery, skip stops, reset at terminus)
+- **Express/Local Patterns**: Skip-stop patterns for express and local services
 
-## Installing the Mod without Steam
-First get the files by pressing the green "Code" button on the top right of the page and then "Download ZIP". Then extract the files to your mods folder. The mods folder is located in your Transport Fever 2 folder. On Windows it is usually `C:\Program Files (x86)\Steam\steamapps\common\Transport Fever 2\mods`. 
+### New Modules
 
-When you're done, there should be a folder names `TPF2-Timetables` in your mods folder. Inside that folder there should be a file named `mod.lua`. TPF2 should now detect the mod and complain about the mod format being deprecated. You can ignore that warning.
+- **Timetable Templates**: Save and reuse common timetable patterns (frequency-based, ArrDep, unbunch)
+- **Timetable Validator**: Automatically detect conflicts, overlaps, and impossible schedules
+- **Line Coordinator**: Coordinate timetables across multiple lines for synchronized transfers
+- **Timetable Scheduler**: Time-based, day-based, seasonal, and event-based timetable variations
+- **Timetable Visualizer**: Data export for timeline visualization and conflict analysis
 
-If someone knows how to install the mod without that warning, please let me know.
+### Analytics & Monitoring
 
-## How to Contribute
-Found a bug? Have an idea for a new feature? Want to help with the documentation? Please open an issue or a pull request. I'm happy to help and answer questions.
+- **Delay Tracking**: Comprehensive delay statistics per line and station
+- **Delay Alerts**: Real-time notifications when delays exceed thresholds
+- **Advanced Analytics**: Delay trends, punctuality heatmaps, service frequency analysis, capacity utilization metrics
+- **Statistics Dashboard**: On-time performance, average delays, and service quality metrics
 
-If you want to actively develop, fork this repo, make your changes and create a pull request. I'll review it and merge it if it looks good and fits in with the rest of the mod. If you want to discuss your changes before you start working on them, please open an issue or contact me on Discord (Gregory365#5262).
+### Integration & Management
 
-There is a [Discord server](https://discord.gg/7KbVP8Fr6Z) for this mod that was created by the orginal creator. You can use it to discuss the mod, ask questions or just hang out.
+- **CommonAPI2 Integration**: Enhanced performance, persistence, event-driven updates, and resource management
+- **Enhanced Export/Import**: Export timetables to files, import from files, timetable library for sharing
+- **Batch Operations**: Apply templates, copy timetables, and configure settings across multiple lines/stations at once
+- **Persistence**: Automatic save/load of all timetable data, settings, and statistics
+
+## Installation
+
+### Via Steam Workshop
+
+Subscribe to the mod on the [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=2408373260).
+
+### Manual Installation
+
+1. Download the mod by clicking the green "Code" button on the top right of this page and selecting "Download ZIP"
+2. Extract the files to your Transport Fever 2 mods folder:
+   - **Windows**: `C:\Program Files (x86)\Steam\steamapps\common\Transport Fever 2\mods`
+   - **Linux**: `~/.steam/steam/steamapps/common/Transport Fever 2/mods`
+   - **macOS**: `~/Library/Application Support/Steam/steamapps/common/Transport Fever 2/mods`
+3. Ensure the folder is named `TPF2-Timetables` and contains a `mod.lua` file
+4. The mod should now appear in your mod list in Transport Fever 2
+
+**Note**: If TPF2 shows a warning about deprecated mod format, you can safely ignore it. The mod is fully functional.
+
+## Usage
+
+1. Open the line overview in Transport Fever 2
+2. Enable timetables by checking the checkbox next to the line
+3. Click on a station to configure its timetable constraints
+4. Choose your timetable type (ArrDep, Unbunch, or AutoUnbunch)
+5. Configure time slots, frequencies, or other settings as needed
+
+Timetables only work when the checkbox on the line overview is enabled.
+
+## CommonAPI2 Integration
+
+This mod integrates with CommonAPI2 when available, providing:
+
+- **Improved Performance**: Batch operations, caching, and optimized API calls
+- **Persistent Data**: Automatic saving and loading of all mod data across game sessions
+- **Event-Driven Updates**: Real-time updates when lines, vehicles, or stations change
+- **Enhanced Reliability**: Better error handling and resource management
+
+The mod gracefully falls back to native TPF2 APIs if CommonAPI2 is not available.
+
+## Project Status
+
+This mod is actively maintained and developed. It is a fork of the original [TPF2-Timetables mod](https://github.com/IncredibleHannes/TPF2-Timetables) by [@IncredibleHannes](https://github.com/IncredibleHannes), with contributions from [@Gregory365](https://github.com/Gregory365), [@quittung](https://github.com/quittung), [@H3lyx](https://github.com/H3lyx), and others.
+
+The current version includes significant enhancements:
+- Full CommonAPI2 integration
+- Advanced timetable management features
+- Comprehensive analytics and monitoring
+- Multiple new modules for extended functionality
+
+## Compatibility
+
+- **Save Compatibility**: Timetables from older versions can be imported, but saves cannot be transferred back to older versions
+- **Breaking Changes**: 
+  - Vehicles now use the *nearest* arrival time slot instead of *next* arrival time
+  - Multiple vehicles at the same station will pick consecutive available slots when the nearest is taken
+
+**Recommendation**: Make backups of saves before migrating to this version.
+
+## Tutorials
+
+- **English**: [YouTube Tutorial](https://www.youtube.com/watch?v=DFCW1PTCO4)
+- **German**: [YouTube Tutorial](https://www.youtube.com/watch?v=ykh5ttBoTAs)
+- **Advanced Timetabling for Local/Express**: [Steam Guide](https://steamcommunity.com/sharedfiles/filedetails/?id=2528355010)
+
+## Contributing
+
+Found a bug? Have an idea for a new feature? Want to help with documentation? Please open an issue or a pull request. Contributions are welcome!
+
+### How to Contribute
+
+1. Fork this repository
+2. Create a branch for your changes
+3. Make your modifications
+4. Test thoroughly
+5. Submit a pull request
+
+If you want to discuss your changes before starting work, please open an issue or contact the maintainers on Discord.
+
+### Development
+
+For developers wanting to understand or modify the code, see the [technical documentation](documentation.md).
+
+## Community
+
+- **Discord Server**: [Join the TPF2-Timetables Discord](https://discord.gg/7KbVP8Fr6Z)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/Gregory365/TPF2-Timetables/issues)
+- **Discussions**: Use the GitHub Discussions tab for questions and ideas
+
+## License
+
+See [LICENSE](LICENSE) file for details.
+
+## Credits
+
+- Original mod by [@IncredibleHannes](https://github.com/IncredibleHannes)
+- Maintained and enhanced by [@Gregory365](https://github.com/Gregory365)
+- Contributions from [@quittung](https://github.com/quittung), [@H3lyx](https://github.com/H3lyx), [@Celmi](https://github.com/Celmi), and the community

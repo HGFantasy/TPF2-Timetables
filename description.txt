@@ -1,33 +1,68 @@
-[h1]Timetables (1.3)[/h1]
-I can proudly present an update to TF2s most popular mod: Timetables!
-This mod adds timetables to the game.
-Timetables can be configured for each line and each station individually. There are three types of timetable constraints that can be added to a station:
+[h1]Timetables (2.0)[/h1]
+I can proudly present a major update to TF2s most popular mod: Timetables!
+This mod adds comprehensive timetables to the game.
+Timetables can be configured for each line and each station individually. There are four types of timetable constraints that can be added to a station:
 [list]
-[*] [b] Arrival/Departure[/b]: You can add arrival/departure timeslots. The train chooses the closest arrival time slot when entering the station, and then wait until the departure time. 
+[*] [b] Arrival/Departure[/b]: You can add arrival/departure timeslots. The train chooses the nearest available arrival time slot when entering the station, and then waits until the departure time. 
 [*] [b] Unbunch[/b]: You can set the frequency and the mod will enforce that the trains will depart this station with the given frequency. 
 [*] [b] Auto Unbunch[/b]: You can set the line to automatically unbunch each vehicle by the frequency of the line.
+[*] [b] None[/b]: The vehicle uses vanilla game logic.
 [/list]
-Trains will depart right away when they are late without interference from the mod. The timetable mod uses the game the stop command and can therefore only enforce longer waiting times. It won't make trains drive faster or load/unload quicker.
+Trains will depart right away when they are late without interference from the mod. The timetable mod uses the game's stop command and can therefore only enforce longer waiting times. It won't make trains drive faster or load/unload quicker.
 
 Timetables are only working when the checkbox on the line overview is ticked.
+
+[h2]New Features in Version 2.0[/h2]
+[list]
+[*] [b]Train Assignment[/b]: Bind specific vehicles to specific timetable slots for precise control
+[*] [b]Platform Assignment[/b]: Assign vehicles to specific platforms at stations
+[*] [b]Maximum Delay Tolerance[/b]: Configure threshold after which vehicles skip to next available slot
+[*] [b]Delay Recovery Strategies[/b]: Multiple recovery modes (catch up, skip to next, hold at terminus, gradual recovery, skip stops, reset at terminus)
+[*] [b]Timetable Templates[/b]: Save and reuse common timetable patterns (frequency-based, ArrDep, unbunch)
+[*] [b]Timetable Validation[/b]: Automatically detect conflicts, overlaps, and impossible schedules
+[*] [b]Line Coordination[/b]: Coordinate timetables across multiple lines for synchronized transfers
+[*] [b]Timetable Scheduler[/b]: Time-based, day-based, seasonal, and event-based timetable variations
+[*] [b]Delay Alerts[/b]: Real-time notifications when delays exceed thresholds
+[*] [b]Advanced Analytics[/b]: Delay trends, punctuality heatmaps, service frequency analysis, capacity utilization
+[*] [b]Automatic Timetable Generation[/b]: Generate timetables based on line frequency and characteristics
+[*] [b]Timetable Visualization[/b]: Data export for timeline visualization and conflict analysis
+[*] [b]Batch Operations[/b]: Apply templates, copy timetables, and configure settings across multiple lines/stations
+[*] [b]Enhanced Export/Import[/b]: Export to files, import from files, timetable library for sharing
+[*] [b]Express/Local Patterns[/b]: Skip-stop patterns for express and local services
+[/list]
+
+[h2]CommonAPI2 Integration[/h2]
+This version includes full CommonAPI2 integration when available, providing:
+[list]
+[*] Improved performance through batch operations and caching
+[*] Automatic persistence of all mod data across game sessions
+[*] Event-driven updates for real-time responsiveness
+[*] Enhanced reliability and error handling
+[/list]
+The mod gracefully falls back to native TPF2 APIs if CommonAPI2 is not available.
+
 [h2]Tutorials[/h2]
 [h3]English[/h3]
 [url=https://www.youtube.com/watch?v=DFCW1PTCoO4]Link[/url]
 [h3]German[/h3]
 [url=https://www.youtube.com/watch?v=ykh5ttBoTAs]Link[/url]
-[h3]Advanced Timetabling for Local/Express[h3]
+[h3]Advanced Timetabling for Local/Express[/h3]
 [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2528355010]Link[/url]
 
 [h2]Updates from the original mod[/h2]
 You can view the original mod [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2408373260]here[/url]
 This mod is a fork of the original and adds the following features:
 [list]
-[*] Supports multiple vehicles at the same station
+[*] Supports multiple vehicles at the same station (no two vehicles can pick the same time slot)
 [*] Remembers the timetable slot of vehicles after a load-save cycle
 [*] Adds Auto Unbunch to automatically unbunch vehicles regardless of how many are on the line
 [*] Updated colours to support the Spring Update line colours
 [*] Minimum waiting time is supported
 [*] Maximum waiting time is supported
+[*] Full CommonAPI2 integration for enhanced performance and reliability
+[*] Comprehensive delay tracking and analytics
+[*] Advanced timetable management features (templates, validation, coordination, scheduling)
+[*] Batch operations for efficient management of large networks
 [/list]
 
 [h2]Things to beware of[/h2]
@@ -46,14 +81,12 @@ The source code of this timetable mod is available on GitHub. Any contributions 
 The source code of the original timetable mod is also available on GitHub.
 [url=https://github.com/IncredibleHannes/TPF2-Timetables][img]https://raw.githubusercontent.com/IncredibleHannes/TPF2-Timetables/develop/github_button.png[/img][/url]
 
-If you want to actively collaborate on the future development of this mod, join the TF2-Timetabeles Discord server:
+If you want to actively collaborate on the future development of this mod, join the TF2-Timetables Discord server:
 [url=https://discord.gg/7KbVP8Fr6Z]Link[/url]
 
-
 [h2]Reporting bugs/Submitting feature requests[/h2]
-My prefered method and therefore the most likely method to get my attention will be through [url=https://github.com/Gregory365/TPF2-Timetables/issues]GitHub issues[/url]
+My preferred method and therefore the most likely method to get my attention will be through [url=https://github.com/Gregory365/TPF2-Timetables/issues]GitHub issues[/url]
 The discussions tab can also be used
-
 
 If you like this mod, a donation would be greatly appreciated:
 This Mod Author
@@ -61,40 +94,50 @@ This Mod Author
 Original Mod Author
 [url=https://www.paypal.com/donate?hosted_button_id=NZWEU467XUWJ6][img]https://i.imgur.com/GpY6AzF.png[/img][/url]
 
-
 ---------------------------------------------------------------------------------------------------------------------------------------------------
 
-[h1]Fahrpläne (1.3)[/h1]
-Ich kann stolz ein Update für TF2s beliebteste Mod präsentieren: Fahrpläne!
-Dieser Mod fügt dem Spiel Fahrpläne hinzu
-Die Fahrpläne können individuell für jede Linie und Station angepasst werden. Es gibt 3 Typen von Fahrplan Bedingungen die einer Station hinzugefügt werden können:
+[h1]Fahrpläne (2.0)[/h1]
+Ich kann stolz ein großes Update für TF2s beliebteste Mod präsentieren: Fahrpläne!
+Dieser Mod fügt dem Spiel umfassende Fahrpläne hinzu
+Die Fahrpläne können individuell für jede Linie und Station angepasst werden. Es gibt 4 Typen von Fahrplan Bedingungen die einer Station hinzugefügt werden können:
 [list]
-[*] [b] Arrival/Departure[/b]: Es ist möglich Ankunft/Abfahrt Slots der Station hinzuzufügen. Der ankommende Zug entscheidend anhand der Ankunftszeit welchen Slot er nimmt und wartet dann bis zur Abfahrtszeit in der Station.
+[*] [b] Arrival/Departure[/b]: Es ist möglich Ankunft/Abfahrt Slots der Station hinzuzufügen. Der ankommende Zug entscheidet anhand der nächstgelegenen verfügbaren Ankunftszeit welchen Slot er nimmt und wartet dann bis zur Abfahrtszeit in der Station.
 [*] [b] Unbunch[/b]: Es kann eine Frequenz gesetzt werden. Der Zug fährt in der gesetzten Frequenz am Bahnhof ab.
 [*] [b] Auto Unbunch[/b]: Sie können die Linie so einstellen, dass jedes Fahrzeug anhand der Frequenz der Linie automatisch entbündelt wird.
+[*] [b] None[/b]: Das Fahrzeug verwendet die Standard-Spiellogik.
 [/list]
-Bei Verspätung fahren die Züge nach dem ein und ausladen direkt weiter. Der Mod verwendet das Stop Kommando aus dem Spiel und kann deshalb nur Züge länger warten lassen, jedoch keine Züge schneller fahren lassen oder die Ladezeitn beschleunigen!
+Bei Verspätung fahren die Züge nach dem ein und ausladen direkt weiter. Der Mod verwendet das Stop Kommando aus dem Spiel und kann deshalb nur Züge länger warten lassen, jedoch keine Züge schneller fahren lassen oder die Ladezeiten beschleunigen!
 
 Damit die Fahrpläne funktionieren muss die kleine Checkbox auf der Linienübersicht aktiviert sein!
-[h2]Tutorials[/h2]
-[h3]Englisch[/h3]
-[url=https://www.youtube.com/watch?v=DFCW1PTCoO4]Link[/url]
-[h3]Deutsch[/h3]
-[url=https://www.youtube.com/watch?v=ykh5ttBoTAs]Link[/url]
-[h3]Fahrplanstruktur für Nahverkehrs- und Schnellzüge[h3]
-[url=https://steamcommunity.com/sharedfiles/filedetails/?id=2528355010]Link[/url]
 
-[h2]Updates from the original mod[/h2]
-Sie können den Original-Mod [url=https://steamcommunity.com/sharedfiles/filedetails/?id=2408373260]hier ansehen[/url]
-Dieser Mod ist ein Fork des Originals und fügt die folgenden Funktionen hinzu:
+[h2]Neue Funktionen in Version 2.0[/h2]
 [list]
-[*] Unterstützt mehrere Fahrzeuge an derselben Station
-[*] Merkt sich den Fahrplan-Slot von Fahrzeugen nach einem Ladesparzyklus
-[*] Fügt Auto Unbunch hinzu, um Fahrzeuge automatisch zu entbündeln, unabhängig davon, wie viele sich auf der Linie befinden
-[*] Aktualisierte Farben zur Unterstützung der neuen Farben aus dem Frühlings-Update
-[*] Mindestwartezeit wird unterstützt
-[*] Maximale Wartezeit wird unterstützt
+[*] [b]Zugzuweisung[/b]: Bestimmte Fahrzeuge an bestimmte Fahrplan-Slots binden für präzise Kontrolle
+[*] [b]Bahnsteigzuweisung[/b]: Fahrzeuge bestimmten Bahnsteigen an Stationen zuweisen
+[*] [b]Maximale Verspätungstoleranz[/b]: Schwellenwert konfigurieren, nach dem Fahrzeuge zum nächsten verfügbaren Slot springen
+[*] [b]Verspätungsrückgewinnungsstrategien[/b]: Mehrere Wiederherstellungsmodi (aufholen, zum nächsten springen, am Endbahnhof halten, schrittweise Wiederherstellung, Haltestellen überspringen, am Endbahnhof zurücksetzen)
+[*] [b]Fahrplanvorlagen[/b]: Häufige Fahrplanmuster speichern und wiederverwenden (frequenzbasiert, ArrDep, Entbündelung)
+[*] [b]Fahrplanvalidierung[/b]: Automatische Erkennung von Konflikten, Überschneidungen und unmöglichen Fahrplänen
+[*] [b]Linienkoordination[/b]: Fahrpläne über mehrere Linien hinweg für synchronisierte Umstiege koordinieren
+[*] [b]Fahrplanplaner[/b]: Zeitbasierte, tagesbasierte, saisonale und ereignisbasierte Fahrplanvariationen
+[*] [b]Verspätungsalarme[/b]: Echtzeitbenachrichtigungen wenn Verspätungen Schwellenwerte überschreiten
+[*] [b]Erweiterte Analysen[/b]: Verspätungstrends, Pünktlichkeits-Wärmekarten, Servicefrequenzanalyse, Kapazitätsauslastung
+[*] [b]Automatische Fahrplanerstellung[/b]: Fahrpläne basierend auf Linienfrequenz und -eigenschaften generieren
+[*] [b]Fahrplanvisualisierung[/b]: Datenexport für Zeitachsenvisualisierung und Konfliktanalyse
+[*] [b]Stapeloperationen[/b]: Vorlagen anwenden, Fahrpläne kopieren und Einstellungen über mehrere Linien/Stationen konfigurieren
+[*] [b]Erweiterter Export/Import[/b]: Export in Dateien, Import aus Dateien, Fahrplanbibliothek zum Teilen
+[*] [b]Express/Nahverkehrsmuster[/b]: Skip-Stop-Muster für Express- und Nahverkehrsdienste
 [/list]
+
+[h2]CommonAPI2-Integration[/h2]
+Diese Version enthält eine vollständige CommonAPI2-Integration, wenn verfügbar, die Folgendes bietet:
+[list]
+[*] Verbesserte Leistung durch Stapeloperationen und Caching
+[*] Automatische Persistierung aller Mod-Daten über Spielsitzungen hinweg
+[*] Ereignisgesteuerte Updates für Echtzeitreaktionsfähigkeit
+[*] Verbesserte Zuverlässigkeit und Fehlerbehandlung
+[/list]
+Der Mod fällt elegant auf native TPF2-APIs zurück, wenn CommonAPI2 nicht verfügbar ist.
 
 [h2]Wichtige Änderungen[/h2]
 [list]
@@ -117,8 +160,7 @@ Wenn du aktiv an der Weiterentwicklung des Mods mitarbeiten möchtest, tritt bit
 
 [h2]Reporting bugs/Submitting feature requests[/h2]
 Bevorzugt über [url=https://github.com/Gregory365/TPF2-Timetables/issues]GitHub[/url], da habt ihr die größten Erfolgsaussichten das ich es auch mitbekomme und behebe!
-Die Registerkarte „Diskussionen“ kann ebenfalls verwendet werden
-
+Die Registerkarte „Diskussionen" kann ebenfalls verwendet werden
 
 Wenn du meine Mods magst freue ich mich über eine kleine Spende:
 Dieser Mod-Autor
