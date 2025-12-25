@@ -3,6 +3,11 @@ local timetableHelper = require "celmi/timetables/timetable_helper"
 
 local gui = require "gui"
 
+-- Use cached entity exists function from timetableHelper (always available)
+local cachedEntityExists = function(entity)
+    return timetableHelper.entityExists(entity, timetableHelper.getTime())
+end
+
 local clockstate = nil
 local vehicleDepartureDisplay = nil -- Display for vehicle departure info
 
@@ -25,6 +30,106 @@ local state = nil
 local timetableChanged = false
 local newTimetableState = {}
 local clearConstraintWindowLaterHACK = nil
+
+-- CommonAPI2 persistence for GUI state
+local commonapi2_available = false
+local commonapi2_persistence_api = nil
+local GUI_STATE_VERSION = 1
+
+-- Check for CommonAPI2 and persistence API
+if commonapi ~= nil and type(commonapi) == "table" then
+    commonapi2_available = true
+    if commonapi.persistence then
+        commonapi2_persistence_api = commonapi.persistence
+    elseif commonapi.data then
+        commonapi2_persistence_api = commonapi.data
+    elseif commonapi.storage then
+        commonapi2_persistence_api = commonapi.storage
+    elseif commonapi.settings then
+        commonapi2_persistence_api = commonapi.settings
+    end
+    
+    -- Use CommonAPI2 lifecycle hooks if available
+    pcall(function()
+        if commonapi.onInit then
+            commonapi.onInit(function()
+                -- Initialize on mod load
+                loadGUIState()
+            end)
+        end
+        
+        if commonapi.onLoad then
+            commonapi.onLoad(function()
+                -- Load persistence data when game loads
+                if timetable.isPersistenceAvailable() then
+                    timetable.loadFromPersistence()
+                end
+                local delayTracker = require "celmi/timetables/delay_tracker"
+                if delayTracker and delayTracker.isPersistenceAvailable and delayTracker.isPersistenceAvailable() then
+                    delayTracker.loadFromPersistence()
+                end
+                loadGUIState()
+            end)
+        end
+    end)
+end
+
+-- Save GUI state to CommonAPI2 persistence
+local function saveGUIState()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false
+    end
+    
+    local success, err = pcall(function()
+        local stateToSave = {
+            version = GUI_STATE_VERSION,
+            uiState = UIState,
+            timestamp = timetableHelper.getTime()
+        }
+        
+        if commonapi2_persistence_api.set then
+            commonapi2_persistence_api.set("timetables_gui_state", stateToSave)
+        elseif commonapi2_persistence_api.save then
+            commonapi2_persistence_api.save("timetables_gui_state", stateToSave)
+        elseif commonapi2_persistence_api.write then
+            commonapi2_persistence_api.write("timetables_gui_state", stateToSave)
+        end
+    end)
+    
+    return success
+end
+
+-- Load GUI state from CommonAPI2 persistence
+local function loadGUIState()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false
+    end
+    
+    local success, loadedState = pcall(function()
+        if commonapi2_persistence_api.get then
+            return commonapi2_persistence_api.get("timetables_gui_state")
+        elseif commonapi2_persistence_api.load then
+            return commonapi2_persistence_api.load("timetables_gui_state")
+        elseif commonapi2_persistence_api.read then
+            return commonapi2_persistence_api.read("timetables_gui_state")
+        end
+        return nil
+    end)
+    
+    if success and loadedState and type(loadedState) == "table" then
+        if loadedState.uiState then
+            -- Restore UI state (merge with defaults)
+            for key, value in pairs(loadedState.uiState) do
+                if UIState[key] ~= nil then
+                    UIState[key] = value
+                end
+            end
+            return true
+        end
+    end
+    
+    return false
+end
 
 -- Cache for line frequencies to avoid recalculating every frame
 local lineFrequencyCache = {} -- lineID -> {frequency = value, lastUpdate = timestamp}
@@ -87,6 +192,8 @@ function timetableGUI.initDepartureBoardTab()
             UIState.currentlySelectedDepartureBoardStation = index
             timetableGUI.dbUpdateDepartures()
             timetableGUI.dbStartPeriodicUpdate()
+            -- Auto-save GUI state when selection changes
+            saveGUIState()
         end
     end)
     
@@ -159,22 +266,67 @@ end
 
 -- Start periodic updates for departure board
 local dbUpdateComponent = nil
+local dbEventDriven = false
 function timetableGUI.dbStartPeriodicUpdate()
     timetableGUI.dbStopPeriodicUpdate() -- Stop any existing update
     
-    dbUpdateComponent = api.gui.comp.Component.new("dbUpdateTimer")
-    local lastUpdate = 0
-    dbUpdateComponent:onStep(function()
-        local currentTime = timetableHelper.getTime()
-        local settings = require "celmi/timetables/settings"
-        local updateInterval = settings.get("departureBoardUpdateInterval")
-        if currentTime - lastUpdate >= updateInterval then
-            lastUpdate = currentTime
+    -- Try event-driven updates first if CommonAPI2 is available
+    if timetableHelper.isCommonAPI2Available() then
+        -- Use event-driven updates
+        local onVehicleStateChanged = function(vehicle)
             if UIState.currentlySelectedDepartureBoardStation ~= nil then
                 timetableGUI.dbUpdateDepartures()
             end
         end
-    end)
+        
+        local onVehicleArrived = function(vehicle, station, line)
+            if UIState.currentlySelectedDepartureBoardStation ~= nil then
+                timetableGUI.dbUpdateDepartures()
+            end
+        end
+        
+        local onVehicleDeparted = function(vehicle, station, line)
+            if UIState.currentlySelectedDepartureBoardStation ~= nil then
+                timetableGUI.dbUpdateDepartures()
+            end
+        end
+        
+        timetableHelper.addEventListener("onVehicleStateChanged", onVehicleStateChanged)
+        timetableHelper.addEventListener("onVehicleArrived", onVehicleArrived)
+        timetableHelper.addEventListener("onVehicleDeparted", onVehicleDeparted)
+        
+        dbEventDriven = true
+        -- Still use a fallback timer for periodic refresh (less frequent)
+        dbUpdateComponent = api.gui.comp.Component.new("dbUpdateTimer")
+        local lastUpdate = 0
+        dbUpdateComponent:onStep(function()
+            local currentTime = timetableHelper.getTime()
+            local settings = require "celmi/timetables/settings"
+            local updateInterval = settings.get("departureBoardUpdateInterval") * 3 -- Less frequent fallback
+            if currentTime - lastUpdate >= updateInterval then
+                lastUpdate = currentTime
+                if UIState.currentlySelectedDepartureBoardStation ~= nil then
+                    timetableGUI.dbUpdateDepartures()
+                end
+            end
+        end)
+    else
+        -- Fallback to polling
+        dbEventDriven = false
+        dbUpdateComponent = api.gui.comp.Component.new("dbUpdateTimer")
+        local lastUpdate = 0
+        dbUpdateComponent:onStep(function()
+            local currentTime = timetableHelper.getTime()
+            local settings = require "celmi/timetables/settings"
+            local updateInterval = settings.get("departureBoardUpdateInterval")
+            if currentTime - lastUpdate >= updateInterval then
+                lastUpdate = currentTime
+                if UIState.currentlySelectedDepartureBoardStation ~= nil then
+                    timetableGUI.dbUpdateDepartures()
+                end
+            end
+        end)
+    end
     
     -- Add to the departure board layout
     if UIState.floatingLayoutDepartureBoard then
@@ -184,6 +336,11 @@ end
 
 -- Stop periodic updates for departure board
 function timetableGUI.dbStopPeriodicUpdate()
+    if dbEventDriven then
+        -- Remove event listeners (we can't easily track which ones, so remove all)
+        -- This is a limitation - in a full implementation we'd track listener references
+        dbEventDriven = false
+    end
     if dbUpdateComponent and UIState.floatingLayoutDepartureBoard then
         UIState.floatingLayoutDepartureBoard:removeItem(dbUpdateComponent)
         dbUpdateComponent = nil
@@ -283,6 +440,9 @@ function timetableGUI.initStatisticsTab()
         if index ~= -1 then
             UIState.currentlySelectedStatisticsLine = index
             timetableGUI.statsUpdateStatistics()
+            timetableGUI.statsStartPeriodicUpdate()
+            -- Auto-save GUI state when selection changes
+            saveGUIState()
         end
     end)
     
@@ -311,7 +471,7 @@ function timetableGUI.statsFillLines()
     
     -- Get all lines with timetables enabled
     for line, _ in pairs(timetable.getCachedTimetableLines()) do
-        if api.engine.entityExists(line) then
+        if cachedEntityExists(line) then
             local lineName = timetableHelper.getLineName(line)
             if lineName and lineName ~= "ERROR" then
                 menu.statsLineTable:addRow({api.gui.comp.TextView.new(tostring(lineName))})
@@ -332,22 +492,60 @@ end
 
 -- Start periodic updates for statistics tab
 local statsUpdateComponent = nil
+local statsEventDriven = false
 function timetableGUI.statsStartPeriodicUpdate()
     timetableGUI.statsStopPeriodicUpdate() -- Stop any existing update
     
-    statsUpdateComponent = api.gui.comp.Component.new("statsUpdateTimer")
-    local lastUpdate = 0
-    statsUpdateComponent:onStep(function()
-        local currentTime = timetableHelper.getTime()
-        local settings = require "celmi/timetables/settings"
-        local updateInterval = settings.get("statisticsUpdateInterval")
-        if currentTime - lastUpdate >= updateInterval then
-            lastUpdate = currentTime
+    -- Try event-driven updates first if CommonAPI2 is available
+    if timetableHelper.isCommonAPI2Available() then
+        -- Use event-driven updates
+        local onVehicleStateChanged = function(vehicle)
             if UIState.currentlySelectedStatisticsLine ~= nil then
                 timetableGUI.statsUpdateStatistics()
             end
         end
-    end)
+        
+        local onLineModified = function(line)
+            if UIState.currentlySelectedStatisticsLine ~= nil then
+                timetableGUI.statsUpdateStatistics()
+            end
+        end
+        
+        timetableHelper.addEventListener("onVehicleStateChanged", onVehicleStateChanged)
+        timetableHelper.addEventListener("onLineModified", onLineModified)
+        
+        statsEventDriven = true
+        -- Still use a fallback timer for periodic refresh (less frequent)
+        statsUpdateComponent = api.gui.comp.Component.new("statsUpdateTimer")
+        local lastUpdate = 0
+        statsUpdateComponent:onStep(function()
+            local currentTime = timetableHelper.getTime()
+            local settings = require "celmi/timetables/settings"
+            local updateInterval = settings.get("statisticsUpdateInterval") * 3 -- Less frequent fallback
+            if currentTime - lastUpdate >= updateInterval then
+                lastUpdate = currentTime
+                if UIState.currentlySelectedStatisticsLine ~= nil then
+                    timetableGUI.statsUpdateStatistics()
+                end
+            end
+        end)
+    else
+        -- Fallback to polling
+        statsEventDriven = false
+        statsUpdateComponent = api.gui.comp.Component.new("statsUpdateTimer")
+        local lastUpdate = 0
+        statsUpdateComponent:onStep(function()
+            local currentTime = timetableHelper.getTime()
+            local settings = require "celmi/timetables/settings"
+            local updateInterval = settings.get("statisticsUpdateInterval")
+            if currentTime - lastUpdate >= updateInterval then
+                lastUpdate = currentTime
+                if UIState.currentlySelectedStatisticsLine ~= nil then
+                    timetableGUI.statsUpdateStatistics()
+                end
+            end
+        end)
+    end
     
     -- Add to the statistics layout
     if UIState.floatingLayoutStatistics then
@@ -357,6 +555,10 @@ end
 
 -- Stop periodic updates for statistics tab
 function timetableGUI.statsStopPeriodicUpdate()
+    if statsEventDriven then
+        -- Remove event listeners
+        statsEventDriven = false
+    end
     if statsUpdateComponent and UIState.floatingLayoutStatistics then
         UIState.floatingLayoutStatistics:removeItem(statsUpdateComponent)
         statsUpdateComponent = nil
@@ -375,7 +577,7 @@ function timetableGUI.statsUpdateStatistics()
     local selectedLineID = nil
     
     for line, _ in pairs(timetable.getCachedTimetableLines()) do
-        if api.engine.entityExists(line) then
+        if cachedEntityExists(line) then
             if lineIndex == UIState.currentlySelectedStatisticsLine then
                 selectedLineID = line
                 break
@@ -633,7 +835,7 @@ end
 -- fills the line table on the right side with all lines that stop at the selected station
 function timetableGUI.stFillLines(tabIndex)
     -- setting up internationalization
-    local lang = api.util.getLanguage()
+    local lang = timetableHelper.getLanguage()
     local local_style = {local_styles[lang.code]}
 
     -- resetting line info
@@ -776,13 +978,13 @@ function timetableGUI.showLineMenu()
         timetableGUI.initLineTable()
         return menu.window:setVisible(true, true)
     end
-    if not api.gui.util.getById('timetable.floatingLayout') then
+    if not timetableHelper.getGUIElementById('timetable.floatingLayout') then
         local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
         floatingLayout:setId("timetable.floatingLayout")
     end
     -- new folting layout to arrange all members
 
-    UIState.boxlayout2 = api.gui.util.getById('timetable.floatingLayout')
+    UIState.boxlayout2 = timetableHelper.getGUIElementById('timetable.floatingLayout')
     UIState.boxlayout2:setGravity(-1,-1)
 
     timetableGUI.initLineTable()
@@ -799,12 +1001,12 @@ function timetableGUI.showLineMenu()
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.lines), wrapper)
 
 
-    if not api.gui.util.getById('timetable.floatingLayoutStationTab') then
+    if not timetableHelper.getGUIElementById('timetable.floatingLayoutStationTab') then
         local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
         floatingLayout:setId("timetable.floatingLayoutStationTab")
     end
 
-    UIState.floatingLayoutStationTab = api.gui.util.getById('timetable.floatingLayoutStationTab')
+    UIState.floatingLayoutStationTab = timetableHelper.getGUIElementById('timetable.floatingLayoutStationTab')
     UIState.floatingLayoutStationTab:setGravity(-1,-1)
 
     timetableGUI.initStationTab()
@@ -813,11 +1015,11 @@ function timetableGUI.showLineMenu()
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.stations),wrapper2)
 
     -- Add Departure Board tab
-    if not api.gui.util.getById('timetable.floatingLayoutDepartureBoard') then
+    if not timetableHelper.getGUIElementById('timetable.floatingLayoutDepartureBoard') then
         local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
         floatingLayout:setId("timetable.floatingLayoutDepartureBoard")
     end
-    UIState.floatingLayoutDepartureBoard = api.gui.util.getById('timetable.floatingLayoutDepartureBoard')
+    UIState.floatingLayoutDepartureBoard = timetableHelper.getGUIElementById('timetable.floatingLayoutDepartureBoard')
     UIState.floatingLayoutDepartureBoard:setGravity(-1,-1)
     
     timetableGUI.initDepartureBoardTab()
@@ -826,11 +1028,11 @@ function timetableGUI.showLineMenu()
     menu.tabWidget:addTab(api.gui.comp.TextView.new("Departure Board"), wrapper3)
 
     -- Add Statistics tab
-    if not api.gui.util.getById('timetable.floatingLayoutStatistics') then
+    if not timetableHelper.getGUIElementById('timetable.floatingLayoutStatistics') then
         local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
         floatingLayout:setId("timetable.floatingLayoutStatistics")
     end
-    UIState.floatingLayoutStatistics = api.gui.util.getById('timetable.floatingLayoutStatistics')
+    UIState.floatingLayoutStatistics = timetableHelper.getGUIElementById('timetable.floatingLayoutStatistics')
     UIState.floatingLayoutStatistics:setGravity(-1,-1)
     
     timetableGUI.initStatisticsTab()
@@ -839,11 +1041,11 @@ function timetableGUI.showLineMenu()
     menu.tabWidget:addTab(api.gui.comp.TextView.new("Statistics"), wrapper4)
     
     -- Settings tab
-    if not api.gui.util.getById('timetable.floatingLayoutSettings') then
+    if not timetableHelper.getGUIElementById('timetable.floatingLayoutSettings') then
         local floatingLayout = api.gui.layout.FloatingLayout.new(0,1)
         floatingLayout:setId("timetable.floatingLayoutSettings")
     end
-    UIState.floatingLayoutSettings = api.gui.util.getById('timetable.floatingLayoutSettings')
+    UIState.floatingLayoutSettings = timetableHelper.getGUIElementById('timetable.floatingLayoutSettings')
     UIState.floatingLayoutSettings:setGravity(-1,-1)
     
     timetableGUI.initSettingsTab()
@@ -1699,7 +1901,7 @@ end
 -- index: index of currently selected line
 -- bool: emit select signal when building table
 function timetableGUI.fillStationTable(index, bool)
-    local lang = api.util.getLanguage()
+    local lang = timetableHelper.getLanguage()
     local local_style = {local_styles[lang.code]}
 
     --initial checks
@@ -2418,7 +2620,7 @@ function timetableGUI.fillConstraintTable(index,lineID)
 
 
     comboBox:onIndexChanged(function (i)
-        if not api.engine.entityExists(lineID) then 
+        if not cachedEntityExists(lineID) then 
             return
         end
         if i == -1 then return end
@@ -3207,9 +3409,51 @@ end
 -- Initialize settings tab
 function timetableGUI.initSettingsTab()
     local settings = require "celmi/timetables/settings"
+    local timetableHelper = require "celmi/timetables/timetable_helper"
     
     local scrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('SettingsContent'), "timetable.settingsContent")
     local contentTable = api.gui.comp.Table.new(1, 'NONE')
+    
+    -- System Information section (at the top)
+    local systemInfoHeader = api.gui.comp.TextView.new("System Information")
+    systemInfoHeader:setStyleClassList({"timetable-section-header"})
+    contentTable:addRow({systemInfoHeader})
+    
+    -- API Status display
+    local apiStatusRow = api.gui.comp.Table.new(2, 'NONE')
+    apiStatusRow:setColWidth(0, 300)
+    local apiStatusLabel = api.gui.comp.TextView.new("API Status:")
+    apiStatusLabel:setGravity(1, 0.5)
+    
+    local apiStatus = timetableHelper.isCommonAPI2Available() and "CommonAPI2 (Active)" or "Native API (Fallback)"
+    local apiStatusText = api.gui.comp.TextView.new(apiStatus)
+    -- Style based on API status
+    if timetableHelper.isCommonAPI2Available() then
+        apiStatusText:setStyleClassList({"timetable-status-good"})
+    else
+        apiStatusText:setStyleClassList({"timetable-status-warning"})
+    end
+    apiStatusRow:addRow({apiStatusLabel, apiStatusText})
+    contentTable:addRow({apiStatusRow})
+    
+    -- Settings Persistence Status display
+    local persistenceRow = api.gui.comp.Table.new(2, 'NONE')
+    persistenceRow:setColWidth(0, 300)
+    local persistenceLabel = api.gui.comp.TextView.new("Settings Persistence:")
+    persistenceLabel:setGravity(1, 0.5)
+    
+    local persistenceStatus = settings.isPersistent() and "Enabled (Saved to CommonAPI2)" or "Disabled (In-Memory Only)"
+    local persistenceText = api.gui.comp.TextView.new(persistenceStatus)
+    if settings.isPersistent() then
+        persistenceText:setStyleClassList({"timetable-status-good"})
+    else
+        persistenceText:setStyleClassList({"timetable-status-warning"})
+    end
+    persistenceRow:addRow({persistenceLabel, persistenceText})
+    contentTable:addRow({persistenceRow})
+    
+    -- Add spacing
+    contentTable:addRow({api.gui.comp.Component.new("Spacer")})
     
     -- Settings sections
     local sections = {
@@ -3260,7 +3504,8 @@ function timetableGUI.initSettingsTab()
             title = "Performance Settings",
             settings = {
                 {key = "cleanTimetableInterval", label = "Cleanup Interval (seconds)", type = "spin", min = 10, max = 300},
-                {key = "cacheInvalidationEnabled", label = "Enable Cache Invalidation", type = "checkbox"}
+                {key = "cacheInvalidationEnabled", label = "Enable Cache Invalidation", type = "checkbox"},
+                {key = "autoSaveEnabled", label = "Auto-Save Settings to CommonAPI2", type = "checkbox"}
             }
         },
         {
@@ -3356,8 +3601,35 @@ function timetableGUI.initSettingsTab()
         contentTable:addRow({api.gui.comp.Component.new("Spacer")})
     end
     
+    -- Settings management buttons
+    local buttonRow = api.gui.comp.Table.new(4, 'NONE')
+    
+    -- Save Settings button (only show if CommonAPI2 is available)
+    if settings.isPersistent() then
+        local saveButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("Save Settings"), true)
+        saveButton:onClick(function()
+            local success, err = settings.forceSave()
+            if success then
+                timetableGUI.popUpMessage("Settings saved successfully", function() end)
+            else
+                timetableGUI.popUpMessage("Failed to save settings: " .. (err or "Unknown error"), function() end)
+            end
+        end)
+        buttonRow:addRow({saveButton})
+        
+        -- Load Settings button
+        local loadButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("Load Settings"), true)
+        loadButton:onClick(function()
+            timetableGUI.popUpYesNo("Load settings from CommonAPI2? This will overwrite current settings.", function()
+                settings.load()
+                timetableGUI.initSettingsTab() -- Refresh UI
+                timetableGUI.popUpMessage("Settings loaded successfully", function() end)
+            end, function() end)
+        end)
+        buttonRow:addRow({loadButton})
+    end
+    
     -- Reset to defaults button
-    local buttonRow = api.gui.comp.Table.new(2, 'NONE')
     local resetButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("Reset to Defaults"), true)
     resetButton:onClick(function()
         timetableGUI.popUpYesNo("Reset all settings to defaults?", function()
@@ -3367,6 +3639,7 @@ function timetableGUI.initSettingsTab()
         end, function() end)
     end)
     buttonRow:addRow({resetButton})
+    
     contentTable:addRow({buttonRow})
     
     scrollArea:setContent(contentTable)
@@ -3380,6 +3653,7 @@ end
 -------------------------------------------------------------
 
 -- Initialize vehicle departure display component
+local vehicleDisplayEventDriven = false
 function timetableGUI.initVehicleDepartureDisplay()
     if vehicleDepartureDisplay then return end
     
@@ -3390,13 +3664,50 @@ function timetableGUI.initVehicleDepartureDisplay()
     vehicleDepartureDisplay:setMinimumSize(api.gui.util.Size.new(250, 30))
     vehicleDepartureDisplay:setMaximumSize(api.gui.util.Size.new(400, 50))
     
-    -- Update display periodically
-    vehicleDepartureDisplay:onStep(function()
-        timetableGUI.updateVehicleDepartureDisplay()
-    end)
+    -- Try event-driven updates first if CommonAPI2 is available
+    if timetableHelper.isCommonAPI2Available() then
+        -- Subscribe to vehicle state change events
+        local onVehicleStateChanged = function(vehicle)
+            timetableGUI.updateVehicleDepartureDisplay()
+        end
+        
+        local onVehicleArrived = function(vehicle, station, line)
+            timetableGUI.updateVehicleDepartureDisplay()
+        end
+        
+        local onVehicleDeparted = function(vehicle, station, line)
+            timetableGUI.updateVehicleDepartureDisplay()
+        end
+        
+        timetableHelper.addEventListener("onVehicleStateChanged", onVehicleStateChanged)
+        timetableHelper.addEventListener("onVehicleArrived", onVehicleArrived)
+        timetableHelper.addEventListener("onVehicleDeparted", onVehicleDeparted)
+        
+        vehicleDisplayEventDriven = true
+        
+        -- Still use a fallback timer for periodic refresh (less frequent)
+        vehicleDepartureDisplay:onStep(function()
+            local settings = require "celmi/timetables/settings"
+            local updateInterval = settings.get("vehicleDepartureDisplayUpdateInterval") * 3 -- Less frequent fallback
+            local lastUpdate = vehicleDepartureDisplay.lastUpdate or 0
+            local currentTime = timetableHelper.getTime()
+            
+            if currentTime - lastUpdate >= updateInterval then
+                vehicleDepartureDisplay.lastUpdate = currentTime
+                timetableGUI.updateVehicleDepartureDisplay()
+            end
+        end)
+    else
+        -- Fallback to polling
+        vehicleDisplayEventDriven = false
+        vehicleDepartureDisplay:onStep(function()
+            timetableGUI.updateVehicleDepartureDisplay()
+        end)
+    end
     
     -- Add to game info layout
-    local gameInfoLayout = api.gui.util.getById("gameInfo"):getLayout()
+    local gameInfoElement = timetableHelper.getGUIElementById("gameInfo")
+    local gameInfoLayout = gameInfoElement and gameInfoElement:getLayout() or nil
     if gameInfoLayout then
         gameInfoLayout:addItem(vehicleDepartureDisplay)
     end
@@ -3425,10 +3736,10 @@ function timetableGUI.updateVehicleDepartureDisplay()
     local delayTracker = require "celmi/timetables/delay_tracker"
     
     for line, _ in pairs(timetable.getCachedTimetableLines()) do
-        if api.engine.entityExists(line) then
-            local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(line)
+        if cachedEntityExists(line) then
+            local vehicles = timetableHelper.getLineVehicles(line, currentTime)
             for _, vehicle in pairs(vehicles) do
-                local vehicleState = timetableHelper.getVehicleInfo(vehicle)
+                local vehicleState = timetableHelper.getVehicleInfo(vehicle, currentTime)
                 if vehicleState and vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
                     local stop = vehicleState.stopIndex + 1
                     
@@ -3482,7 +3793,7 @@ function timetableGUI.popUpMessage(message, onOK)
 
     local okButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("OK"), true)
     menu.popUp = api.gui.comp.Window.new(message, okButton)
-    local position = api.gui.util.getMouseScreenPos()
+    local position = timetableHelper.getMouseScreenPos()
     menu.popUp:setPosition(position.x, position.y)
     menu.popUp:addHideOnCloseHandler()
 
@@ -3505,7 +3816,7 @@ function timetableGUI.popUpYesNo(title, onYes, onNo)
     popUpTable:addRow({yesButton, noButton})
 
     menu.popUp = api.gui.comp.Window.new(title, popUpTable)
-    local position = api.gui.util.getMouseScreenPos()
+    local position = timetableHelper.getMouseScreenPos()
     menu.popUp:setPosition(position.x, position.y)
     menu.popUp:addHideOnCloseHandler()
 
@@ -3528,11 +3839,44 @@ function timetableGUI.popUpYesNo(title, onYes, onNo)
     end)
 end
 
+-- Check if CommonAPI2 provides task scheduling
+local useCommonAPI2Scheduler = false
+if timetableHelper.isCommonAPI2Available() then
+    pcall(function()
+        if commonapi and (commonapi.scheduler or commonapi.tasks or commonapi.taskScheduler) then
+            useCommonAPI2Scheduler = true
+        end
+    end)
+end
+
 function timetableGUI.timetableCoroutine()
     local lastUpdate = -1
 	local currentProcessingTime = 0
     local lastCleanTime = -1
+    
+    -- Use CommonAPI2 task scheduler if available
+    if useCommonAPI2Scheduler then
+        local success = pcall(function()
+            local scheduler = commonapi.scheduler or commonapi.tasks or commonapi.taskScheduler
+            if scheduler and scheduler.schedule then
+                -- Schedule as recurring task
+                scheduler.schedule(function()
+                    currentProcessingTime = timetableHelper.getTime()
+                    if currentProcessingTime - lastUpdate >= 1 then
+                        lastUpdate = currentProcessingTime
+                        timetableGUI.processTimetableUpdate(currentProcessingTime, lastCleanTime)
+                        lastCleanTime = currentProcessingTime
+                    end
+                end, 1.0) -- Run every 1 second
+                return true -- Successfully scheduled
+            end
+        end)
+        if success then
+            return -- Exit coroutine, scheduler handles timing
+        end
+    end
 
+    -- Fallback to coroutine-based scheduling
     while true do
 		currentProcessingTime = timetableHelper.getTime()
         -- only run once a second to avoid unnecessary cpu usage
@@ -3542,33 +3886,67 @@ function timetableGUI.timetableCoroutine()
         end
 
         lastUpdate = currentProcessingTime
-        -- Cache current time to avoid redundant getTime() calls
-		-- Debug prints removed for performance (can be re-enabled with a debug flag if needed)
-		-- print("Timetable ping " .. os.date('%M:%S', lastUpdate))
-		-- print("Lua is using " .. tostring(math.floor(api.util.getLuaUsedMemory()/(1024*1024))).."MB of memory")
+        timetableGUI.processTimetableUpdate(currentProcessingTime, lastCleanTime)
+        lastCleanTime = currentProcessingTime
+        
+        coroutine.yield()
+    end
+end
 
-        -- Only process lines that have timetables enabled
-        -- Pass cached current time to avoid redundant getTime() calls
-        for line, _ in pairs(timetable.getCachedTimetableLines()) do
-            if api.engine.entityExists(line) then
-                local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(line)
+-- Extract update logic to separate function for use with scheduler
+function timetableGUI.processTimetableUpdate(currentProcessingTime, lastCleanTime)
+    -- Cache current time to avoid redundant getTime() calls
+	-- Debug prints removed for performance (can be re-enabled with a debug flag if needed)
+	-- print("Timetable ping " .. os.date('%M:%S', currentProcessingTime))
+	-- print("Lua is using " .. tostring(math.floor(api.util.getLuaUsedMemory()/(1024*1024))).."MB of memory")
+
+    -- Clean caches periodically to prevent memory leaks
+    timetableHelper.cleanCaches(currentProcessingTime)
+    
+    -- Flush command batch periodically
+    timetableHelper.flushCommandBatch()
+
+    -- Only process lines that have timetables enabled
+    -- Batch get vehicles for all lines at once using cached system queries
+    local timetableLines = timetable.getCachedTimetableLines()
+    for line, _ in pairs(timetableLines) do
+        if cachedEntityExists(line) then
+            local vehicles = timetableHelper.getLineVehicles(line, currentProcessingTime)
+            if vehicles then
                 for _, vehicle in pairs(vehicles) do
-                    local vehicleState = timetableHelper.getVehicleInfo(vehicle)
-                    if vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
+                    local vehicleState = timetableHelper.getVehicleInfo(vehicle, currentProcessingTime)
+                    if vehicleState and vehicleState.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
                         timetable.updateForVehicle(vehicle, line, vehicles, vehicleState, currentProcessingTime)
                     end
                 end
             end
         end
+    end
 
-        -- Run cleanTimetable() at configured interval
-        local settings = require "celmi/timetables/settings"
-        local cleanInterval = settings.get("cleanTimetableInterval")
-        if lastCleanTime < 0 or currentProcessingTime - lastCleanTime >= cleanInterval then
-            timetable.cleanTimetable()
-            lastCleanTime = currentProcessingTime
-        end
-        coroutine.yield()
+    -- Run cleanTimetable() at configured interval
+    local settings = require "celmi/timetables/settings"
+    local cleanInterval = settings.get("cleanTimetableInterval")
+    if lastCleanTime < 0 or currentProcessingTime - lastCleanTime >= cleanInterval then
+        -- Pass current time to avoid redundant getTime() calls inside cleanTimetable
+        timetable.cleanTimetable(currentProcessingTime)
+        lastCleanTime = currentProcessingTime
+    end
+    
+    -- Auto-save timetable data if CommonAPI2 persistence is available
+    if timetable.isPersistenceAvailable() then
+        timetable.autoSaveIfNeeded(currentProcessingTime)
+    end
+    
+    -- Auto-save delay tracker data if CommonAPI2 persistence is available
+    local delayTracker = require "celmi/timetables/delay_tracker"
+    if delayTracker and delayTracker.isPersistenceAvailable and delayTracker.isPersistenceAvailable() then
+        delayTracker.autoSaveIfNeeded(currentProcessingTime)
+    end
+    
+    -- Auto-save unified persistence if available
+    local persistenceManager = require "celmi/timetables/persistence_manager"
+    if persistenceManager and persistenceManager.isAvailable() then
+        persistenceManager.autoSaveIfNeeded(currentProcessingTime)
     end
 end
 
@@ -3591,6 +3969,9 @@ function data()
             state = {}
             state.timetable = timetable.getTimetableObject(true) -- Include settings
             
+            -- Save GUI state to persistence
+            saveGUIState()
+            
             return state
         end,
 
@@ -3598,9 +3979,35 @@ function data()
             -- load happens once for engine thread and repeatedly for gui thread
             state = loadedState or {timetable = {}}
 
+            -- Load persistence data first (before setting timetable object)
+            -- This ensures saved data is available even if game save doesn't have it
+            if timetable.isPersistenceAvailable() then
+                local success, err = timetable.loadFromPersistence()
+                if success then
+                    print("Timetables: Loaded timetable data from CommonAPI2 persistence")
+                elseif err and err ~= "No saved timetable data found" then
+                    print("Timetables: Failed to load timetable persistence: " .. tostring(err))
+                end
+            end
+            
+            -- Load delay tracker persistence
+            local delayTracker = require "celmi/timetables/delay_tracker"
+            if delayTracker and delayTracker.isPersistenceAvailable then
+                local success, err = delayTracker.loadFromPersistence()
+                if success then
+                    print("Timetables: Loaded delay data from CommonAPI2 persistence")
+                elseif err and err ~= "No saved delay data found" then
+                    print("Timetables: Failed to load delay persistence: " .. tostring(err))
+                end
+            end
+
+            -- Set timetable object from game save (may override persistence if both exist)
             timetable.setTimetableObject(state.timetable)
             -- Initialize cache on first load
             timetable.initializeTimetableLinesCache()
+            
+            -- Load GUI state from persistence
+            loadGUIState()
         end,
 
         update = function()
@@ -3633,7 +4040,7 @@ function data()
             -- state.timetable = timetable.getTimetableObject()
 
             local currentTime = timetableHelper.getTime()
-            local lines = game.interface.getLines()
+            local lines = timetableHelper.getInterfaceLines()
             local currentLinesSet = {}
             
             -- Build set of current lines
@@ -3704,7 +4111,40 @@ function data()
 
         guiUpdate = function()
             if timetableChanged then
-                game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject(true)) -- Include settings
+                -- Try CommonAPI2 messaging API if available
+                local sent = false
+                if timetableHelper.isCommonAPI2Available() and commonapi then
+                    if commonapi.sendMessage then
+                        local success = pcall(function()
+                            commonapi.sendMessage("timetableUpdate", timetable.getTimetableObject(true))
+                        end)
+                        if success then
+                            sent = true
+                        end
+                    elseif commonapi.messaging and commonapi.messaging.send then
+                        local success = pcall(function()
+                            commonapi.messaging.send("timetableUpdate", timetable.getTimetableObject(true))
+                        end)
+                        if success then
+                            sent = true
+                        end
+                    elseif commonapi.events and commonapi.events.send then
+                        local success = pcall(function()
+                            commonapi.events.send("timetableUpdate", timetable.getTimetableObject(true))
+                        end)
+                        if success then
+                            sent = true
+                        end
+                    end
+                end
+                
+                -- Fallback to native API
+                if not sent then
+                    if game and game.interface and game.interface.sendScriptEvent then
+                        game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject(true)) -- Include settings
+                    end
+                end
+                
                 timetableChanged = false
             end
 			

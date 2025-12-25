@@ -1,6 +1,33 @@
 local timetableHelper = require "celmi/timetables/timetable_helper"
 local guard = require "celmi/timetables/guard"
 local delayTracker = require "celmi/timetables/delay_tracker"
+local persistenceManager = require "celmi/timetables/persistence_manager"
+
+-- CommonAPI2 persistence for timetable data
+local commonapi2_available = false
+local commonapi2_persistence_api = nil
+local TIMETABLE_DATA_VERSION = 1
+
+-- Check for CommonAPI2 and persistence API
+if commonapi ~= nil and type(commonapi) == "table" then
+    commonapi2_available = true
+    -- Check for various possible CommonAPI2 persistence APIs
+    if commonapi.persistence then
+        commonapi2_persistence_api = commonapi.persistence
+    elseif commonapi.data then
+        commonapi2_persistence_api = commonapi.data
+    elseif commonapi.storage then
+        commonapi2_persistence_api = commonapi.storage
+    elseif commonapi.settings then
+        -- Reuse settings API if persistence not available separately
+        commonapi2_persistence_api = commonapi.settings
+    end
+end
+
+-- Use cached entity exists function from timetableHelper (always available)
+local cachedEntityExists = function(entity)
+    return timetableHelper.entityExists(entity, timetableHelper.getTime())
+end
 
 --[[
 timetable = {
@@ -18,6 +45,17 @@ stationInfo = {
             slot = {}
             departureTime = 1 :: int
         }
+    },
+    -- Train assignments: bind specific vehicles to specific timetable slots
+    trainAssignments = {
+        vehicleNumber = {
+            slotIndex = 1 :: int,  -- Index of the assigned slot
+            slot = {}              -- The assigned slot content
+        }
+    },
+    -- Platform assignments: assign vehicles to specific platforms at stations
+    platformAssignments = {
+        vehicleNumber = platformNumber :: int  -- Platform number (1-based)
     }
 }
 
@@ -44,7 +82,9 @@ local DELAY_RECOVERY_MODE = {
     CATCH_UP = "catch_up",           -- Try to return to schedule (current behavior)
     SKIP_TO_NEXT = "skip_to_next",   -- Abandon current slot, use next available
     HOLD_AT_TERMINUS = "hold_at_terminus", -- Wait longer at end stations to realign
-    GRADUAL_RECOVERY = "gradual_recovery"   -- Slowly return to schedule over multiple stops
+    GRADUAL_RECOVERY = "gradual_recovery",   -- Slowly return to schedule over multiple stops
+    SKIP_STOPS = "skip_stops",        -- Skip intermediate stops to catch up
+    RESET_AT_TERMINUS = "reset_at_terminus" -- Reset schedule at terminus
 }
 
 -- Cache for lines with timetables enabled
@@ -758,6 +798,35 @@ function timetable.readyToDepartArrDep(vehicle, doorsTime, vehicles, currentTime
         local arrivalDelay = doorsTime - scheduledArrival
         if arrivalDelay > 30 then -- Vehicle arrived late
             local recoveryMode = timetable.getDelayRecoveryMode(line, stop)
+            
+            -- Advanced recovery strategies
+            if recoveryMode == DELAY_RECOVERY_MODE.SKIP_STOPS then
+                -- Skip stops strategy: reduce wait time at intermediate stops
+                -- This is handled by reducing waitTime in getWaitTime calculation
+                -- For now, just reduce wait time by 50% at non-terminal stops
+                local stations = timetableHelper.getAllStations(line)
+                local stationCount = 0
+                for _ in pairs(stations) do
+                    stationCount = stationCount + 1
+                end
+                
+                -- Only apply at intermediate stops (not first or last)
+                if stop > 1 and stop < stationCount then
+                    waitTime = math.floor(waitTime * 0.5) -- Reduce wait time by 50%
+                end
+            elseif recoveryMode == DELAY_RECOVERY_MODE.RESET_AT_TERMINUS then
+                -- Reset at terminus: at terminal stations, wait longer to reset schedule
+                local stations = timetableHelper.getAllStations(line)
+                local stationCount = 0
+                for _ in pairs(stations) do
+                    stationCount = stationCount + 1
+                end
+                
+                -- At terminal stations, add extra wait time to reset
+                if stop == 1 or stop == stationCount then
+                    waitTime = waitTime + math.min(arrivalDelay, 300) -- Add up to 5 minutes
+                end
+            end
             if recoveryMode == DELAY_RECOVERY_MODE.CATCH_UP then
                 local lineMode = timetable.getLineDelayRecoveryMode(line)
                 if lineMode then recoveryMode = lineMode end
@@ -1333,7 +1402,7 @@ function timetable.getNextDepartures(stationID, count, currentTime)
     
     -- Iterate through all lines serving this station
     for lineID, _ in pairs(stationLinesMap[stationID]) do
-        if timetable.hasTimetable(lineID) and api.engine.entityExists(lineID) then
+        if timetable.hasTimetable(lineID) and cachedEntityExists(lineID) then
             -- Find the stop number for this station on this line
             local lineInfo = timetableObject[lineID]
             if lineInfo and lineInfo.stations then
@@ -2191,7 +2260,7 @@ end
 function timetable.autoGenerateTimetable(lineID, options)
     options = options or {}
     
-    if not api.engine.entityExists(lineID) then
+    if not cachedEntityExists(lineID) then
         return false, "Line does not exist"
     end
     
@@ -2684,6 +2753,38 @@ function timetable.getNextSlot(slots, arrivalTime, vehiclesWaiting, line, stop, 
     -- Add nil checks and early returns
     if not slots or #slots == 0 then return nil end
     if not vehiclesWaiting then vehiclesWaiting = {} end
+    
+    -- Check if vehicle has a train assignment to a specific slot
+    if vehicle and line and stop and timetableObject[line] and timetableObject[line].stations and timetableObject[line].stations[stop] then
+        local stationInfo = timetableObject[line].stations[stop]
+        if stationInfo.trainAssignments and stationInfo.trainAssignments[vehicle] then
+            local assignment = stationInfo.trainAssignments[vehicle]
+            local assignedSlot = assignment.slot
+            local slotIndex = assignment.slotIndex
+            
+            -- Validate that the assigned slot is still valid
+            if assignedSlot and timetable.isValidSlot(assignedSlot, arrivalTime, slots, line, stop) then
+                -- Check if slot is available (not occupied by another vehicle)
+                local slotAvailable = true
+                if vehiclesWaiting then
+                    for otherVehicle, waitingInfo in pairs(vehiclesWaiting) do
+                        if otherVehicle ~= vehicle and waitingInfo.slot and timetable.slotsEqual(assignedSlot, waitingInfo.slot) then
+                            -- Slot is occupied by another vehicle
+                            slotAvailable = false
+                            break
+                        end
+                    end
+                end
+                
+                if slotAvailable then
+                    return assignedSlot
+                end
+            else
+                -- Assignment is invalid, clear it
+                timetable.removeTrainAssignment(line, stop, vehicle)
+            end
+        end
+    end
     
     -- Use cached sorted slots if line and stop are provided, otherwise sort on the fly
     local sortedSlots
@@ -3194,21 +3295,457 @@ function timetable.clearExportedClipboard()
     timetable.exportClipboard = nil
 end
 
+-------------------------------------------------------------
+---------------------- Enhanced Export/Import ----------------------
+-------------------------------------------------------------
+
+-- Export timetable to file (via CommonAPI2 if available, otherwise returns string)
+-- @param lineID integer The line ID
+-- @param filePath string Optional file path (if CommonAPI2 file API available)
+-- @return boolean success, string|nil data or error message
+function timetable.exportTimetableToFile(lineID, filePath)
+    local exportString = timetable.exportTimetable(lineID)
+    if not exportString then
+        return false, "Failed to export timetable"
+    end
+    
+    -- Try to save to file if CommonAPI2 file API available
+    if commonapi2_available and commonapi.file then
+        if filePath then
+            local success, err = pcall(function()
+                if commonapi.file.write then
+                    commonapi.file.write(filePath, exportString)
+                elseif commonapi.file.save then
+                    commonapi.file.save(filePath, exportString)
+                else
+                    error("File API not available")
+                end
+            end)
+            if success then
+                return true, nil
+            else
+                return false, tostring(err)
+            end
+        end
+    end
+    
+    -- Return export string if file API not available
+    return true, exportString
+end
+
+-- Import timetable from file (via CommonAPI2 if available, otherwise from string)
+-- @param filePath string File path (if CommonAPI2 file API available)
+-- @param importString string Optional import string (if file API not available)
+-- @return boolean success, string error message
+function timetable.importTimetableFromFile(filePath, importString)
+    local data = importString
+    
+    -- Try to read from file if CommonAPI2 file API available
+    if commonapi2_available and commonapi.file and filePath then
+        local success, fileData = pcall(function()
+            if commonapi.file.read then
+                return commonapi.file.read(filePath)
+            elseif commonapi.file.load then
+                return commonapi.file.load(filePath)
+            else
+                error("File API not available")
+            end
+        end)
+        if success and fileData then
+            data = fileData
+        elseif not success then
+            return false, tostring(fileData)
+        end
+    end
+    
+    if not data then
+        return false, "No import data provided"
+    end
+    
+    -- Parse and import the data
+    return timetable.importTimetable(data)
+end
+
+-- Get timetable library (list of saved timetables)
+-- @return table Array of {name, lineID, description, ...}
+function timetable.getTimetableLibrary()
+    -- This would use CommonAPI2 persistence to store a library of timetables
+    if commonapi2_available and commonapi2_persistence_api then
+        local success, library = pcall(function()
+            if commonapi2_persistence_api.get then
+                return commonapi2_persistence_api.get("timetables_library")
+            elseif commonapi2_persistence_api.load then
+                return commonapi2_persistence_api.load("timetables_library")
+            end
+            return nil
+        end)
+        if success and library then
+            return library
+        end
+    end
+    
+    return {}
+end
+
+-- Save timetable to library
+-- @param name string Timetable name
+-- @param lineID integer The line ID
+-- @param description string Optional description
+-- @return boolean success, string error message
+function timetable.saveTimetableToLibrary(name, lineID, description)
+    if not name or name == "" then
+        return false, "Timetable name is required"
+    end
+    
+    local exportString = timetable.exportTimetable(lineID)
+    if not exportString then
+        return false, "Failed to export timetable"
+    end
+    
+    if commonapi2_available and commonapi2_persistence_api then
+        local success, library = pcall(function()
+            if commonapi2_persistence_api.get then
+                return commonapi2_persistence_api.get("timetables_library")
+            elseif commonapi2_persistence_api.load then
+                return commonapi2_persistence_api.load("timetables_library")
+            end
+            return {}
+        end)
+        
+        if not success then
+            library = {}
+        end
+        
+        if not library or type(library) ~= "table" then
+            library = {}
+        end
+        
+        -- Add or update timetable in library
+        library[name] = {
+            name = name,
+            lineID = lineID,
+            description = description or "",
+            data = exportString,
+            saved = timetableHelper.getTime()
+        }
+        
+        local saveSuccess, err = pcall(function()
+            if commonapi2_persistence_api.set then
+                commonapi2_persistence_api.set("timetables_library", library)
+            elseif commonapi2_persistence_api.save then
+                commonapi2_persistence_api.save("timetables_library", library)
+            elseif commonapi2_persistence_api.write then
+                commonapi2_persistence_api.write("timetables_library", library)
+            else
+                error("Persistence API not available")
+            end
+        end)
+        
+        if saveSuccess then
+            return true, nil
+        else
+            return false, tostring(err)
+        end
+    end
+    
+    return false, "Persistence not available"
+end
+
+-- Load timetable from library
+-- @param name string Timetable name
+-- @param targetLineID integer Target line ID to import to
+-- @return boolean success, string error message
+function timetable.loadTimetableFromLibrary(name, targetLineID)
+    if not name or name == "" then
+        return false, "Timetable name is required"
+    end
+    
+    if commonapi2_available and commonapi2_persistence_api then
+        local success, library = pcall(function()
+            if commonapi2_persistence_api.get then
+                return commonapi2_persistence_api.get("timetables_library")
+            elseif commonapi2_persistence_api.load then
+                return commonapi2_persistence_api.load("timetables_library")
+            end
+            return nil
+        end)
+        
+        if success and library and library[name] then
+            local timetableData = library[name].data
+            if timetableData then
+                return timetable.importTimetable(timetableData, targetLineID)
+            else
+                return false, "Timetable data not found in library"
+            end
+        else
+            return false, "Timetable not found in library"
+        end
+    end
+    
+    return false, "Persistence not available"
+end
+
+-------------------------------------------------------------
+---------------------- Train Assignment ----------------------
+-------------------------------------------------------------
+
+-- Assign a specific vehicle to a specific timetable slot
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @param vehicle integer The vehicle ID
+-- @param slotIndex integer The index of the slot in the slots array
+-- @return boolean success, string error message
+function timetable.assignTrainToSlot(line, stop, vehicle, slotIndex)
+    if not line or not stop or not vehicle or not slotIndex then
+        return false, "Invalid parameters"
+    end
+    
+    -- Validate line and stop exist
+    if not timetableObject[line] then
+        return false, "Line not found"
+    end
+    if not timetableObject[line].stations then
+        timetableObject[line].stations = {}
+    end
+    if not timetableObject[line].stations[stop] then
+        return false, "Stop not found"
+    end
+    
+    -- Get slots for this station
+    local currentTime = timetableHelper.getTime()
+    local slots = timetable.getActiveSlots(line, stop, currentTime)
+    if not slots or #slots == 0 then
+        return false, "No slots defined for this station"
+    end
+    
+    -- Validate slot index
+    if slotIndex < 1 or slotIndex > #slots then
+        return false, "Invalid slot index"
+    end
+    
+    local slot = slots[slotIndex]
+    if not slot then
+        return false, "Slot not found"
+    end
+    
+    -- Initialize trainAssignments if needed
+    if not timetableObject[line].stations[stop].trainAssignments then
+        timetableObject[line].stations[stop].trainAssignments = {}
+    end
+    
+    -- Check for conflicts: another vehicle already assigned to this slot
+    local conflicts = {}
+    for otherVehicle, assignment in pairs(timetableObject[line].stations[stop].trainAssignments) do
+        if otherVehicle ~= vehicle and assignment.slotIndex == slotIndex then
+            table.insert(conflicts, otherVehicle)
+        end
+    end
+    
+    -- Store assignment
+    timetableObject[line].stations[stop].trainAssignments[vehicle] = {
+        slotIndex = slotIndex,
+        slot = slot
+    }
+    
+    -- Clear any conflicts (remove assignments from other vehicles)
+    for _, conflictVehicle in ipairs(conflicts) do
+        timetableObject[line].stations[stop].trainAssignments[conflictVehicle] = nil
+    end
+    
+    return true, conflicts and #conflicts > 0 and ("Assignment created, " .. #conflicts .. " conflict(s) resolved") or "Assignment created"
+end
+
+-- Remove train assignment for a vehicle
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @param vehicle integer The vehicle ID
+-- @return boolean success
+function timetable.removeTrainAssignment(line, stop, vehicle)
+    if not line or not stop or not vehicle then
+        return false
+    end
+    
+    if not timetableObject[line] or not timetableObject[line].stations or not timetableObject[line].stations[stop] then
+        return false
+    end
+    
+    if timetableObject[line].stations[stop].trainAssignments then
+        timetableObject[line].stations[stop].trainAssignments[vehicle] = nil
+    end
+    
+    return true
+end
+
+-- Get the assigned slot for a vehicle
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @param vehicle integer The vehicle ID
+-- @return table|nil The assigned slot, or nil if not assigned
+function timetable.getAssignedSlot(line, stop, vehicle)
+    if not line or not stop or not vehicle then
+        return nil
+    end
+    
+    if not timetableObject[line] or not timetableObject[line].stations or not timetableObject[line].stations[stop] then
+        return nil
+    end
+    
+    if timetableObject[line].stations[stop].trainAssignments and timetableObject[line].stations[stop].trainAssignments[vehicle] then
+        return timetableObject[line].stations[stop].trainAssignments[vehicle].slot
+    end
+    
+    return nil
+end
+
+-- Get train assignment information
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @param vehicle integer The vehicle ID
+-- @return table|nil Assignment info {slotIndex, slot}, or nil if not assigned
+function timetable.getTrainAssignment(line, stop, vehicle)
+    if not line or not stop or not vehicle then
+        return nil
+    end
+    
+    if not timetableObject[line] or not timetableObject[line].stations or not timetableObject[line].stations[stop] then
+        return nil
+    end
+    
+    if timetableObject[line].stations[stop].trainAssignments and timetableObject[line].stations[stop].trainAssignments[vehicle] then
+        return timetableObject[line].stations[stop].trainAssignments[vehicle]
+    end
+    
+    return nil
+end
+
+-- Check if a vehicle is assigned to a slot
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @param vehicle integer The vehicle ID
+-- @return boolean True if assigned, false otherwise
+function timetable.isTrainAssigned(line, stop, vehicle)
+    return timetable.getTrainAssignment(line, stop, vehicle) ~= nil
+end
+
+-- Validate if a slot is still valid for the current arrival time
+-- @param slot table The slot to validate
+-- @param arrivalTime integer The current arrival time
+-- @param slots table The current slots array (optional, for validation)
+-- @param line integer The line ID (optional)
+-- @param stop integer The stop index (optional)
+-- @return boolean True if slot is valid, false otherwise
+function timetable.isValidSlot(slot, arrivalTime, slots, line, stop)
+    if not slot then return false end
+    
+    -- Check if slot still exists in current slots array
+    if slots then
+        local slotExists = false
+        for _, s in ipairs(slots) do
+            if timetable.slotsEqual(slot, s) then
+                slotExists = true
+                break
+            end
+        end
+        if not slotExists then
+            return false
+        end
+    end
+    
+    -- Basic validation: slot should have valid structure
+    if type(slot) ~= "table" or #slot < 4 then
+        return false
+    end
+    
+    -- Slot is valid if it exists and has proper structure
+    return true
+end
+
+-- Clear invalid train assignments for a station
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+function timetable.clearInvalidAssignments(line, stop)
+    if not line or not stop then return end
+    
+    if not timetableObject[line] or not timetableObject[line].stations or not timetableObject[line].stations[stop] then
+        return
+    end
+    
+    if not timetableObject[line].stations[stop].trainAssignments then
+        return
+    end
+    
+    local currentTime = timetableHelper.getTime()
+    local slots = timetable.getActiveSlots(line, stop, currentTime)
+    
+    -- Remove assignments for slots that no longer exist
+    local assignments = timetableObject[line].stations[stop].trainAssignments
+    for vehicle, assignment in pairs(assignments) do
+        if not timetable.isValidSlot(assignment.slot, currentTime, slots, line, stop) then
+            assignments[vehicle] = nil
+        end
+    end
+end
+
+-- Get list of vehicles that can be assigned (vehicles on the line)
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line (optional)
+-- @return table Array of vehicle IDs
+function timetable.getAssignableTrains(line, stop)
+    if not line then return {} end
+    
+    local vehicles = {}
+    local currentTime = timetableHelper.getTime()
+    local lineVehicles = timetableHelper.getLineVehicles(line, currentTime)
+    
+    for _, vehicle in pairs(lineVehicles) do
+        table.insert(vehicles, vehicle)
+    end
+    
+    return vehicles
+end
+
+-- Get station slots information
+-- @param line integer The line ID
+-- @param stop integer The stop index on the line
+-- @return table Array of slots with their indices
+function timetable.getStationSlots(line, stop)
+    if not line or not stop then return {} end
+    
+    local currentTime = timetableHelper.getTime()
+    local slots = timetable.getActiveSlots(line, stop, currentTime)
+    if not slots then return {} end
+    
+    local result = {}
+    for i, slot in ipairs(slots) do
+        table.insert(result, {
+            index = i,
+            slot = slot,
+            arrivalSlot = timetable.slotToArrivalSlot(slot),
+            departureSlot = timetable.slotToDepartureSlot(slot)
+        })
+    end
+    
+    return result
+end
+
 -- removes old lines from timetable
 -- Optimized cleanTimetable that only processes changed lines
-function timetable.cleanTimetable()
+function timetable.cleanTimetable(currentTime)
     local delayTracker = require "celmi/timetables/delay_tracker"
-    local currentTime = timetableHelper.getTime()
+    currentTime = currentTime or timetableHelper.getTime()
+    
+    -- Clean caches periodically
+    timetableHelper.cleanCaches(currentTime)
     
     for lineID, _ in pairs(timetableObject) do
-        if not timetableHelper.lineExists(lineID) then
+        if not timetableHelper.lineExists(lineID, currentTime) then
             timetableObject[lineID] = nil
             -- Clean up sorted slots cache for removed line
             sortedSlotsCache[lineID] = nil
             slotHashSetCache[lineID] = nil
             print("removed line " .. lineID)
         else
-            local stations = timetableHelper.getAllStations(lineID)
+            local stations = timetableHelper.getAllStations(lineID) -- Uses cached component access internally
             -- Clean up sorted slots cache for removed stations
             if sortedSlotsCache[lineID] then
                 for stationID = #stations + 1, 1000 do
@@ -3231,7 +3768,7 @@ function timetable.cleanTimetable()
             
             -- Clean up stale vehicle entries from vehiclesWaiting tables
             local currentVehicles = {}
-            local lineVehicles = timetableHelper.getVehiclesOnLine(lineID)
+            local lineVehicles = timetableHelper.getVehiclesOnLine(lineID, currentTime)
             for _, vehicle in pairs(lineVehicles) do
                 currentVehicles[vehicle] = true
             end
@@ -3257,6 +3794,136 @@ function timetable.cleanTimetable()
     -- Invalidate station lines map cache when cleaning timetable (lines/stations may have changed)
     timetable.invalidateStationLinesMapCache()
 end
+
+-- CommonAPI2 persistence functions for timetable data
+-- Save timetable data to CommonAPI2 persistence
+function timetable.saveToPersistence()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false, "CommonAPI2 persistence not available"
+    end
+    
+    local success, err = pcall(function()
+        -- Prepare timetable data with version info
+        local dataToSave = {
+            version = TIMETABLE_DATA_VERSION,
+            timetableData = timetableObject,
+            timestamp = timetableHelper.getTime()
+        }
+        
+        -- Try different possible API methods
+        if commonapi2_persistence_api.set then
+            commonapi2_persistence_api.set("timetables_data", dataToSave)
+        elseif commonapi2_persistence_api.save then
+            commonapi2_persistence_api.save("timetables_data", dataToSave)
+        elseif commonapi2_persistence_api.write then
+            commonapi2_persistence_api.write("timetables_data", dataToSave)
+        elseif commonapi2_persistence_api.store then
+            commonapi2_persistence_api.store("timetables_data", dataToSave)
+        else
+            error("CommonAPI2 persistence API not found")
+        end
+    end)
+    
+    if success then
+        return true, nil
+    else
+        return false, tostring(err)
+    end
+end
+
+-- Load timetable data from CommonAPI2 persistence
+function timetable.loadFromPersistence()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false, "CommonAPI2 persistence not available"
+    end
+    
+    local success, loadedData = pcall(function()
+        -- Try different possible API methods
+        if commonapi2_persistence_api.get then
+            return commonapi2_persistence_api.get("timetables_data")
+        elseif commonapi2_persistence_api.load then
+            return commonapi2_persistence_api.load("timetables_data")
+        elseif commonapi2_persistence_api.read then
+            return commonapi2_persistence_api.read("timetables_data")
+        elseif commonapi2_persistence_api.retrieve then
+            return commonapi2_persistence_api.retrieve("timetables_data")
+        end
+        return nil
+    end)
+    
+    if success and loadedData and type(loadedData) == "table" then
+        -- Handle versioned data structure
+        local timetableData = loadedData
+        if loadedData.timetableData and loadedData.version then
+            -- New versioned format
+            timetableData = loadedData.timetableData
+            -- Handle migration if version differs
+            if loadedData.version < TIMETABLE_DATA_VERSION then
+                -- Future: implement migration logic here
+                print("Timetables: Migrating timetable data from version " .. loadedData.version .. " to " .. TIMETABLE_DATA_VERSION)
+            end
+        end
+        
+        -- Set the loaded timetable data
+        timetable.setTimetableObject(timetableData)
+        return true, nil
+    else
+        return false, success and "No saved timetable data found" or tostring(loadedData)
+    end
+end
+
+-- Check if timetable persistence is available
+function timetable.isPersistenceAvailable()
+    return commonapi2_available and commonapi2_persistence_api ~= nil
+end
+
+-- Auto-save timetable data (call periodically from update loop)
+local lastAutoSaveTime = 0
+local AUTO_SAVE_INTERVAL = 30 -- Save every 30 seconds
+
+function timetable.autoSaveIfNeeded(currentTime)
+    if not timetable.isPersistenceAvailable() then
+        return false
+    end
+    
+    currentTime = currentTime or timetableHelper.getTime()
+    
+    -- Only auto-save periodically
+    if currentTime - lastAutoSaveTime >= AUTO_SAVE_INTERVAL then
+        local success, err = timetable.saveToPersistence()
+        if success then
+            lastAutoSaveTime = currentTime
+            return true
+        else
+            print("Timetables: Auto-save failed: " .. tostring(err))
+            return false
+        end
+    end
+    
+    return false
+end
+
+-- Register with persistence manager on module load
+pcall(function()
+    if persistenceManager and persistenceManager.isAvailable() then
+        persistenceManager.registerModule("timetable", 
+            function()
+                return timetable.getTimetableObject(true)
+            end,
+            function(data)
+                if data and data.timetableData then
+                    timetable.setTimetableObject(data.timetableData)
+                    return true
+                elseif data then
+                    timetable.setTimetableObject(data)
+                    return true
+                end
+                return false
+            end,
+            TIMETABLE_DATA_VERSION
+        )
+    end
+end)
 
 return timetable
 

@@ -4,6 +4,27 @@
 
 local delayTracker = {}
 
+-- CommonAPI2 persistence for delay data
+local commonapi2_available = false
+local commonapi2_persistence_api = nil
+local DELAY_DATA_VERSION = 1
+
+-- Check for CommonAPI2 and persistence API
+if commonapi ~= nil and type(commonapi) == "table" then
+    commonapi2_available = true
+    -- Check for various possible CommonAPI2 persistence APIs
+    if commonapi.persistence then
+        commonapi2_persistence_api = commonapi.persistence
+    elseif commonapi.data then
+        commonapi2_persistence_api = commonapi.data
+    elseif commonapi.storage then
+        commonapi2_persistence_api = commonapi.storage
+    elseif commonapi.settings then
+        -- Reuse settings API if persistence not available separately
+        commonapi2_persistence_api = commonapi.settings
+    end
+end
+
 -- Delay cache: lineID -> stationID -> vehicleID -> {delay = seconds, lastUpdate = timestamp}
 local delayCache = {}
 
@@ -44,6 +65,68 @@ function delayTracker.calculateDelay(vehicle, line, station, scheduledTime, curr
     return currentTime - scheduledTime
 end
 
+-- Delay alert system
+local delayAlerts = {}
+local alertHistory = {}
+local MAX_ALERT_HISTORY = 100
+
+-- Check and trigger delay alerts
+local function checkDelayAlerts(line, station, vehicle, delay, currentTime)
+    if not delay or delay <= 0 then return end -- Only alert on delays, not early arrivals
+    
+    local settings = require "celmi/timetables/settings"
+    if not settings.get("delayAlertEnabled") then return end
+    
+    -- Get threshold (per-line or global)
+    local threshold = settings.get("delayAlertPerLineThreshold")[line] or settings.get("delayAlertThreshold")
+    if not threshold or delay < threshold then return end
+    
+    -- Check if we've already alerted for this delay (avoid spam)
+    local alertKey = tostring(line) .. "_" .. tostring(station) .. "_" .. tostring(vehicle)
+    local lastAlert = delayAlerts[alertKey]
+    if lastAlert and currentTime - lastAlert.time < 60 then
+        -- Already alerted within last minute, skip
+        return
+    end
+    
+    -- Record alert
+    delayAlerts[alertKey] = {
+        line = line,
+        station = station,
+        vehicle = vehicle,
+        delay = delay,
+        time = currentTime
+    }
+    
+    -- Add to alert history
+    table.insert(alertHistory, {
+        line = line,
+        station = station,
+        vehicle = vehicle,
+        delay = delay,
+        threshold = threshold,
+        time = currentTime
+    })
+    
+    -- Keep only last N entries
+    if #alertHistory > MAX_ALERT_HISTORY then
+        table.remove(alertHistory, 1)
+    end
+    
+    -- Trigger visual/sound alerts if enabled
+    local timetableHelper = require "celmi/timetables/timetable_helper"
+    if settings.get("delayAlertVisualEnabled") then
+        timetableHelper.logWarn("Delay Alert: Line %s, Station %s, Vehicle %s: %d seconds delay (threshold: %d)", 
+            tostring(line), tostring(station), tostring(vehicle), delay, threshold)
+    end
+    
+    if settings.get("delayAlertSoundEnabled") then
+        -- Sound alerts would require game API support
+        -- For now, just log
+        timetableHelper.logWarn("Delay Alert Sound: Line %s delayed by %d seconds", tostring(line), delay)
+    end
+end
+
 -- Record delay for a vehicle departure/arrival
 function delayTracker.recordDelay(line, station, vehicle, delay, currentTime)
     if not line or not station or not vehicle or not delay then return end
@@ -55,6 +138,9 @@ function delayTracker.recordDelay(line, station, vehicle, delay, currentTime)
         delay = delay,
         lastUpdate = currentTime
     }
+    
+    -- Check for delay alerts
+    checkDelayAlerts(line, station, vehicle, delay, currentTime)
     
     -- Update statistics
     if not statisticsCache[line] then statisticsCache[line] = {} end
@@ -413,5 +499,158 @@ function delayTracker.cleanup(currentTime, maxAge)
         end
     end
 end
+
+-- Save delay statistics to CommonAPI2 persistence
+function delayTracker.saveToPersistence()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false, "CommonAPI2 persistence not available"
+    end
+    
+    local success, err = pcall(function()
+        -- Prepare delay data with version info
+        local dataToSave = {
+            version = DELAY_DATA_VERSION,
+            statisticsCache = statisticsCache,
+            delayHistory = delayHistory,
+            timeBasedDelayHistory = timeBasedDelayHistory,
+            delayPatternCache = delayPatternCache,
+            timestamp = require("celmi/timetables/timetable_helper").getTime()
+        }
+        
+        -- Try different possible API methods
+        if commonapi2_persistence_api.set then
+            commonapi2_persistence_api.set("timetables_delay_data", dataToSave)
+        elseif commonapi2_persistence_api.save then
+            commonapi2_persistence_api.save("timetables_delay_data", dataToSave)
+        elseif commonapi2_persistence_api.write then
+            commonapi2_persistence_api.write("timetables_delay_data", dataToSave)
+        elseif commonapi2_persistence_api.store then
+            commonapi2_persistence_api.store("timetables_delay_data", dataToSave)
+        else
+            error("CommonAPI2 persistence API not found")
+        end
+    end)
+    
+    if success then
+        return true, nil
+    else
+        return false, tostring(err)
+    end
+end
+
+-- Load delay statistics from CommonAPI2 persistence
+function delayTracker.loadFromPersistence()
+    if not commonapi2_available or not commonapi2_persistence_api then
+        return false, "CommonAPI2 persistence not available"
+    end
+    
+    local success, loadedData = pcall(function()
+        -- Try different possible API methods
+        if commonapi2_persistence_api.get then
+            return commonapi2_persistence_api.get("timetables_delay_data")
+        elseif commonapi2_persistence_api.load then
+            return commonapi2_persistence_api.load("timetables_delay_data")
+        elseif commonapi2_persistence_api.read then
+            return commonapi2_persistence_api.read("timetables_delay_data")
+        elseif commonapi2_persistence_api.retrieve then
+            return commonapi2_persistence_api.retrieve("timetables_delay_data")
+        end
+        return nil
+    end)
+    
+    if success and loadedData and type(loadedData) == "table" then
+        -- Handle versioned data structure
+        if loadedData.version and loadedData.version < DELAY_DATA_VERSION then
+            -- Future: implement migration logic here
+            print("Timetables: Migrating delay data from version " .. loadedData.version .. " to " .. DELAY_DATA_VERSION)
+        end
+        
+        -- Restore data
+        if loadedData.statisticsCache then
+            statisticsCache = loadedData.statisticsCache
+        end
+        if loadedData.delayHistory then
+            delayHistory = loadedData.delayHistory
+            -- Ensure history doesn't exceed size limit
+            while #delayHistory > DELAY_HISTORY_SIZE do
+                table.remove(delayHistory, 1)
+            end
+        end
+        if loadedData.timeBasedDelayHistory then
+            timeBasedDelayHistory = loadedData.timeBasedDelayHistory
+        end
+        if loadedData.delayPatternCache then
+            delayPatternCache = loadedData.delayPatternCache
+        end
+        
+        return true, nil
+    else
+        return false, success and "No saved delay data found" or tostring(loadedData)
+    end
+end
+
+-- Check if delay persistence is available
+function delayTracker.isPersistenceAvailable()
+    return commonapi2_available and commonapi2_persistence_api ~= nil
+end
+
+-- Auto-save delay data (call periodically from update loop)
+local lastDelayAutoSaveTime = 0
+local DELAY_AUTO_SAVE_INTERVAL = 60 -- Save every 60 seconds
+
+function delayTracker.autoSaveIfNeeded(currentTime)
+    if not delayTracker.isPersistenceAvailable() then
+        return false
+    end
+    
+    currentTime = currentTime or require("celmi/timetables/timetable_helper").getTime()
+    
+    -- Only auto-save periodically
+    if currentTime - lastDelayAutoSaveTime >= DELAY_AUTO_SAVE_INTERVAL then
+        local success, err = delayTracker.saveToPersistence()
+        if success then
+            lastDelayAutoSaveTime = currentTime
+            return true
+        else
+            print("Timetables: Delay auto-save failed: " .. tostring(err))
+            return false
+        end
+    end
+    
+    return false
+end
+
+-- Register with persistence manager on module load
+pcall(function()
+    local persistenceManager = require "celmi/timetables/persistence_manager"
+    if persistenceManager and persistenceManager.isAvailable() then
+        persistenceManager.registerModule("delay", 
+            function()
+                return {
+                    statisticsCache = statisticsCache,
+                    delayHistory = delayHistory,
+                    timeBasedDelayHistory = timeBasedDelayHistory,
+                    delayPatternCache = delayPatternCache
+                }
+            end,
+            function(data)
+                if data then
+                    if data.statisticsCache then statisticsCache = data.statisticsCache end
+                    if data.delayHistory then
+                        delayHistory = data.delayHistory
+                        while #delayHistory > DELAY_HISTORY_SIZE do
+                            table.remove(delayHistory, 1)
+                        end
+                    end
+                    if data.timeBasedDelayHistory then timeBasedDelayHistory = data.timeBasedDelayHistory end
+                    if data.delayPatternCache then delayPatternCache = data.delayPatternCache end
+                    return true
+                end
+                return false
+            end,
+            DELAY_DATA_VERSION
+        )
+    end
+end)
 
 return delayTracker

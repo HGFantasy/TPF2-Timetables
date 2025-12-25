@@ -6,6 +6,26 @@ local routeFinder = {}
 local networkGraphCache = require "celmi/timetables/network_graph_cache"
 local timetableHelper = require "celmi/timetables/timetable_helper"
 
+-- Use cached entity exists function from timetableHelper (always available)
+local cachedEntityExists = function(entity)
+    return timetableHelper.entityExists(entity, timetableHelper.getTime())
+end
+
+-- Register route finder caches with centralized cache invalidation
+if timetableHelper.registerCacheInvalidation then
+    -- Register distance cache invalidation
+    timetableHelper.registerCacheInvalidation("networkGraph", function()
+        routeFinder.clearDistanceCache()
+    end)
+    
+    -- Register station position cache invalidation
+    timetableHelper.registerCacheInvalidation("entity", function(entity)
+        if entity then
+            timetableHelper.invalidateStationPositionCache(entity)
+        end
+    end)
+end
+
 -- Carrier type mapping
 local CARRIER_TYPES = {
     RAIL = api.type.enum.Carrier.RAIL,
@@ -27,28 +47,63 @@ function routeFinder.findStations(carrierType)
     local stationMap = {} -- Use map to avoid duplicates
     
     -- Get all lines and find stations on lines of the correct carrier type
-    local lines = api.engine.system.lineSystem.getLines()
+    local currentTime = timetableHelper.getTime()
+    local lines = timetableHelper.getLines(currentTime)
     
+    -- Batch collect all first vehicles from all lines for carrier type checking
+    local vehicleIds = {}
+    local lineToVehicleMap = {}
     for _, lineID in pairs(lines) do
-        -- Check if line uses this carrier type
-        local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
+        local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
         if vehicles and vehicles[1] then
-            local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
-            if vehicleComponent and vehicleComponent.carrier == carrierEnum then
+            vehicleIds[#vehicleIds + 1] = vehicles[1]
+            lineToVehicleMap[vehicles[1]] = lineID
+        end
+    end
+    
+    -- Batch get vehicle components
+    local vehicleComponents = timetableHelper.batchGetVehicleComponents(vehicleIds, api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
+    
+    -- Collect station IDs that need names
+    local stationIdsForNames = {}
+    local stationIdSet = {}
+    
+    for vehicleId, vehicleComponent in pairs(vehicleComponents) do
+        if vehicleComponent and vehicleComponent.carrier == carrierEnum then
+            local lineID = lineToVehicleMap[vehicleId]
+            if lineID then
                 -- Get all stations on this line
                 local lineStations = timetableHelper.getAllStations(lineID)
                 for _, stationID in pairs(lineStations) do
                     if not stationMap[stationID] then
                         stationMap[stationID] = true
-                        local stationName = timetableHelper.getStationName(stationID)
-                        if stationName and stationName ~= "ERROR" then
-                            table.insert(stations, {
-                                id = stationID,
-                                name = stationName
-                            })
+                        if not stationIdSet[stationID] then
+                            stationIdSet[stationID] = true
+                            stationIdsForNames[#stationIdsForNames + 1] = stationID
                         end
                     end
                 end
+            end
+        end
+    end
+    
+    -- Batch get station name components if we have stations to process
+    if #stationIdsForNames > 0 then
+        local stationNameComponents = timetableHelper.batchGetLineComponents(stationIdsForNames, api.type.ComponentType.NAME, currentTime)
+        for _, stationID in ipairs(stationIdsForNames) do
+            local nameComponent = stationNameComponents[stationID]
+            local stationName = "ERROR"
+            if nameComponent and nameComponent.name then
+                stationName = nameComponent.name
+            else
+                -- Fallback to individual lookup
+                stationName = timetableHelper.getStationName(stationID)
+            end
+            if stationName and stationName ~= "ERROR" then
+                table.insert(stations, {
+                    id = stationID,
+                    name = stationName
+                })
             end
         end
     end
@@ -77,47 +132,111 @@ function routeFinder.buildNetworkGraph(carrierType)
     local graph = {}
     local stations = routeFinder.findStations(carrierType)
     
-    -- Build connectivity by checking existing lines
-    -- For each station, find which other stations are reachable via existing lines
+    -- Pre-fetch all station positions for distance calculations
+    local allStationIDs = {}
     for _, station in ipairs(stations) do
+        table.insert(allStationIDs, station.id)
         if not graph[station.id] then
             graph[station.id] = {neighbors = {}}
         end
-        
-        -- Find lines that serve this station
-        local lines = api.engine.system.lineSystem.getLines()
-        for _, lineID in pairs(lines) do
-            -- Check if line uses this carrier type
-            local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
-            if vehicles and vehicles[1] then
-                local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
-                if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
-                    -- Get all stations on this line
-                    local lineStations = timetableHelper.getAllStations(lineID)
-                    local stationList = {}
-                    for k, v in pairs(lineStations) do
-                        table.insert(stationList, {index = k, stationID = v})
-                    end
-                    table.sort(stationList, function(a, b) return a.index < b.index end)
+    end
+    local stationPositions = timetableHelper.batchGetStationPositions(allStationIDs, timetableHelper.getTime())
+    
+    -- Collect all station pairs that need distance calculation
+    local distancePairs = {}
+    local pairToGraph = {} -- Map pairs to graph entries
+    
+    -- Build connectivity by checking existing lines
+    -- For each station, find which other stations are reachable via existing lines
+    local currentTime = timetableHelper.getTime()
+    local lines = timetableHelper.getLines(currentTime)
+    
+    -- Batch collect all first vehicles from all lines for carrier type checking
+    local vehicleIds = {}
+    local lineToVehicleMap = {}
+    for _, lineID in pairs(lines) do
+        local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
+        if vehicles and vehicles[1] then
+            vehicleIds[#vehicleIds + 1] = vehicles[1]
+            lineToVehicleMap[vehicles[1]] = lineID
+        end
+    end
+    
+    -- Batch get vehicle components
+    local vehicleComponents = timetableHelper.batchGetVehicleComponents(vehicleIds, api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
+    
+    -- Collect all station pairs that need distances
+    for vehicleId, vehicleComponent in pairs(vehicleComponents) do
+        if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
+            local lineID = lineToVehicleMap[vehicleId]
+            if lineID then
+                -- Get all stations on this line
+                local lineStations = timetableHelper.getAllStations(lineID)
+                local stationList = {}
+                for k, v in pairs(lineStations) do
+                    table.insert(stationList, {index = k, stationID = v})
+                end
+                table.sort(stationList, function(a, b) return a.index < b.index end)
+                
+                -- Collect pairs for batch distance calculation
+                for i = 1, #stationList - 1 do
+                    local currentStation = stationList[i].stationID
+                    local nextStation = stationList[i + 1].stationID
                     
-                    -- Add connections between consecutive stations with distance calculation
-                    for i = 1, #stationList - 1 do
-                        local currentStation = stationList[i].stationID
-                        local nextStation = stationList[i + 1].stationID
-                        
-                        -- Calculate actual distance between stations
-                        local distance = routeFinder.calculateStationDistance(currentStation, nextStation)
-                        
-                        if currentStation == station.id then
-                            -- Add next station as neighbor with distance
-                            if not graph[station.id].neighbors[nextStation] or graph[station.id].neighbors[nextStation] > distance then
-                                graph[station.id].neighbors[nextStation] = distance
-                            end
-                        elseif nextStation == station.id then
-                            -- Add previous station as neighbor (bidirectional) with distance
-                            if not graph[station.id].neighbors[currentStation] or graph[station.id].neighbors[currentStation] > distance then
-                                graph[station.id].neighbors[currentStation] = distance
-                            end
+                    -- Check if we need this distance
+                    local needsDistance = false
+                    for _, station in ipairs(stations) do
+                        if station.id == currentStation or station.id == nextStation then
+                            needsDistance = true
+                            break
+                        end
+                    end
+                    
+                    if needsDistance then
+                        local pairKey = tostring(currentStation) .. "_" .. tostring(nextStation)
+                        if not distancePairs[pairKey] then
+                            table.insert(distancePairs, {currentStation, nextStation})
+                            distancePairs[pairKey] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Batch calculate all distances
+    local batchDistances = routeFinder.batchCalculateDistances(distancePairs)
+    
+    -- Now build graph using pre-calculated distances
+    for vehicleId, vehicleComponent in pairs(vehicleComponents) do
+        if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
+            local lineID = lineToVehicleMap[vehicleId]
+            if lineID then
+                local lineStations = timetableHelper.getAllStations(lineID)
+                local stationList = {}
+                for k, v in pairs(lineStations) do
+                    table.insert(stationList, {index = k, stationID = v})
+                end
+                table.sort(stationList, function(a, b) return a.index < b.index end)
+                
+                -- Add connections using pre-calculated distances
+                for i = 1, #stationList - 1 do
+                    local currentStation = stationList[i].stationID
+                    local nextStation = stationList[i + 1].stationID
+                    
+                    local pairKey1 = tostring(currentStation) .. "_" .. tostring(nextStation)
+                    local pairKey2 = tostring(nextStation) .. "_" .. tostring(currentStation)
+                    local distance = batchDistances[pairKey1] or batchDistances[pairKey2] or routeFinder.calculateStationDistance(currentStation, nextStation)
+                    
+                    -- Add to graph for both stations (bidirectional)
+                    if graph[currentStation] then
+                        if not graph[currentStation].neighbors[nextStation] or graph[currentStation].neighbors[nextStation] > distance then
+                            graph[currentStation].neighbors[nextStation] = distance
+                        end
+                    end
+                    if graph[nextStation] then
+                        if not graph[nextStation].neighbors[currentStation] or graph[nextStation].neighbors[currentStation] > distance then
+                            graph[nextStation].neighbors[currentStation] = distance
                         end
                     end
                 end
@@ -131,23 +250,65 @@ function routeFinder.buildNetworkGraph(carrierType)
     return graph
 end
 
+-- Distance cache for station pairs
+local distanceCache = {}
+local distanceCacheTime = {}
+local DISTANCE_CACHE_DURATION = 60 -- Cache for 60 seconds
+
 -- Calculate distance between two stations (Euclidean distance)
 -- Returns distance in game units, or default large value if positions unavailable
+-- Uses cached positions and distance cache for performance
 function routeFinder.calculateStationDistance(station1ID, station2ID)
     if not station1ID or not station2ID then
         return 1000 -- Default large distance for invalid inputs
     end
     
-    local station1 = api.engine.getComponent(station1ID, api.type.ComponentType.STATION_GROUP)
-    local station2 = api.engine.getComponent(station2ID, api.type.ComponentType.STATION_GROUP)
+    -- Check distance cache first
+    local cacheKey1 = tostring(station1ID) .. "_" .. tostring(station2ID)
+    local cacheKey2 = tostring(station2ID) .. "_" .. tostring(station1ID)
+    local cachedDistance = distanceCache[cacheKey1] or distanceCache[cacheKey2]
+    if cachedDistance and distanceCacheTime[cacheKey1 or cacheKey2] then
+        local cachedTime = distanceCacheTime[cacheKey1] or distanceCacheTime[cacheKey2]
+        local currentTime = timetableHelper.getTime()
+        if currentTime - cachedTime < DISTANCE_CACHE_DURATION then
+            return cachedDistance
+        end
+    end
     
-    if not station1 or not station1.position or not station2 or not station2.position then
+    -- Try CommonAPI2 distance API if available
+    if commonapi and commonapi.calculateDistance then
+        local success, distance = pcall(function()
+            return commonapi.calculateDistance(station1ID, station2ID)
+        end)
+        if success and distance and distance > 0 then
+            -- Cache the result
+            distanceCache[cacheKey1] = distance
+            distanceCacheTime[cacheKey1] = timetableHelper.getTime()
+            return distance
+        end
+    elseif commonapi and commonapi.getDistance then
+        local success, distance = pcall(function()
+            return commonapi.getDistance(station1ID, station2ID)
+        end)
+        if success and distance and distance > 0 then
+            distanceCache[cacheKey1] = distance
+            distanceCacheTime[cacheKey1] = timetableHelper.getTime()
+            return distance
+        end
+    end
+    
+    -- Fallback to manual calculation using cached positions
+    local currentTime = timetableHelper.getTime()
+    local pos1 = timetableHelper.getStationPosition(station1ID, currentTime)
+    local pos2 = timetableHelper.getStationPosition(station2ID, currentTime)
+    
+    if not pos1 or not pos2 then
         return 1000 -- Default large distance if positions unavailable
     end
     
-    local dx = station2.position.x - station1.position.x
-    local dy = station2.position.y - station1.position.y
-    local dz = station2.position.z - station1.position.z
+    local dx = pos2.x - pos1.x
+    local dy = pos2.y - pos1.y
+    local dz = pos2.z - pos1.z
     
     local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
     
@@ -156,7 +317,73 @@ function routeFinder.calculateStationDistance(station1ID, station2ID)
         return 1000
     end
     
+    -- Cache the calculated distance
+    distanceCache[cacheKey1] = distance
+    distanceCacheTime[cacheKey1] = currentTime
+    
     return distance
+end
+
+-- Clear distance cache (call when stations are modified)
+function routeFinder.clearDistanceCache()
+    distanceCache = {}
+    distanceCacheTime = {}
+end
+
+-- Batch calculate distances for multiple station pairs
+function routeFinder.batchCalculateDistances(stationPairs)
+    if not stationPairs or #stationPairs == 0 then
+        return {}
+    end
+    
+    local results = {}
+    local stationIDs = {}
+    local stationIDSet = {}
+    
+    -- Collect all unique station IDs
+    for _, pair in ipairs(stationPairs) do
+        if not stationIDSet[pair[1]] then
+            stationIDSet[pair[1]] = true
+            table.insert(stationIDs, pair[1])
+        end
+        if not stationIDSet[pair[2]] then
+            stationIDSet[pair[2]] = true
+            table.insert(stationIDs, pair[2])
+        end
+    end
+    
+    -- Batch fetch all station positions
+    local positions = timetableHelper.batchGetStationPositions(stationIDs, timetableHelper.getTime())
+    
+    -- Calculate distances for all pairs
+    for _, pair in ipairs(stationPairs) do
+        local station1ID = pair[1]
+        local station2ID = pair[2]
+        local key = tostring(station1ID) .. "_" .. tostring(station2ID)
+        
+        local pos1 = positions[station1ID]
+        local pos2 = positions[station2ID]
+        
+        if pos1 and pos2 then
+            local dx = pos2.x - pos1.x
+            local dy = pos2.y - pos1.y
+            local dz = pos2.z - pos1.z
+            local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+            
+            if distance and distance == distance and distance ~= math.huge then
+                results[key] = distance
+                -- Cache the result
+                distanceCache[key] = distance
+                distanceCacheTime[key] = timetableHelper.getTime()
+            else
+                results[key] = 1000
+            end
+        else
+            results[key] = 1000
+        end
+    end
+    
+    return results
 end
 
 -- A* pathfinding algorithm for finding shortest path
@@ -172,7 +399,7 @@ function routeFinder.findPath(startStationID, endStationID, carrierType, network
     end
     
     -- Validate station IDs exist
-    if not api.engine.entityExists(startStationID) or not api.engine.entityExists(endStationID) then
+    if not cachedEntityExists(startStationID) or not cachedEntityExists(endStationID) then
         return nil
     end
     
@@ -192,6 +419,7 @@ function routeFinder.findPath(startStationID, endStationID, carrierType, network
     
     -- Initialize
     gScore[startStationID] = 0
+    -- Use cached distance calculation (already optimized with caching)
     local initialHeuristic = routeFinder.calculateStationDistance(startStationID, endStationID)
     fScore[startStationID] = initialHeuristic
     
@@ -244,7 +472,7 @@ function routeFinder.findPath(startStationID, endStationID, carrierType, network
             for neighborID, distance in pairs(neighbors) do
                 if not closedSet[neighborID] and distance and distance > 0 then
                     -- Validate neighbor exists
-                    if api.engine.entityExists(neighborID) then
+                    if cachedEntityExists(neighborID) then
                         local tentativeG = gScore[current.station] + distance
                         
                         -- Check if this path to neighbor is better
@@ -293,7 +521,7 @@ function routeFinder.findRouteOptions(startStationID, endStationID, carrierType,
     end
     
     -- Validate stations exist
-    if not api.engine.entityExists(startStationID) or not api.engine.entityExists(endStationID) then
+    if not cachedEntityExists(startStationID) or not cachedEntityExists(endStationID) then
         return {}
     end
     
@@ -349,7 +577,7 @@ function routeFinder.findPathBFS(startStationID, endStationID, carrierType, netw
     end
     
     -- Validate stations exist
-    if not api.engine.entityExists(startStationID) or not api.engine.entityExists(endStationID) then
+    if not cachedEntityExists(startStationID) or not cachedEntityExists(endStationID) then
         return nil
     end
     
@@ -416,11 +644,12 @@ function routeFinder.validateRoute(route, carrierType)
     
     -- Check if all stations support the carrier type
     for _, stationID in ipairs(route) do
-        if not api.engine.entityExists(stationID) then
+        if not cachedEntityExists(stationID) then
             return false, "Station does not exist: " .. tostring(stationID)
         end
         
-        local stationComponent = api.engine.getComponent(stationID, api.type.ComponentType.STATION_GROUP)
+        local currentTime = timetableHelper.getTime()
+        local stationComponent = timetableHelper.getComponent(stationID, api.type.ComponentType.STATION_GROUP, currentTime)
         if not stationComponent then
             return false, "Invalid station: " .. tostring(stationID)
         end
@@ -495,8 +724,9 @@ function routeFinder.getRoutePreview(route, carrierType)
     
     -- Check for depots near route endpoints
     if route[1] and route[#route] then
-        local station1 = api.engine.getComponent(route[1], api.type.ComponentType.STATION_GROUP)
-        local station2 = api.engine.getComponent(route[#route], api.type.ComponentType.STATION_GROUP)
+        local currentTime = timetableHelper.getTime()
+        local station1 = timetableHelper.getComponent(route[1], api.type.ComponentType.STATION_GROUP, currentTime)
+        local station2 = timetableHelper.getComponent(route[#route], api.type.ComponentType.STATION_GROUP, currentTime)
         if station1 and station1.position then
             local depots1 = routeFinder.findDepots(carrierType, station1.position, 500)
             if #depots1 > 0 then
@@ -555,13 +785,79 @@ function routeFinder.analyzeTrafficFlow(carrierType, updateInterval)
     local segments = {}
     
     -- Count vehicles on each line segment
-    local lines = api.engine.system.lineSystem.getLines()
+    local currentTime = timetableHelper.getTime()
+    local lines = timetableHelper.getLines(currentTime)
+    
+    -- Batch collect all vehicles and their components
+    local allVehicleIds = {}
+    local vehicleToLineMap = {}
     for _, lineID in pairs(lines) do
-        local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
-        if vehicles and vehicles[1] then
-            local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
-            if vehicleComponent and vehicleComponent.carrier == carrierEnum then
+        local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
+        if vehicles then
+            for _, vehicleID in pairs(vehicles) do
+                table.insert(allVehicleIds, vehicleID)
+                vehicleToLineMap[vehicleID] = lineID
+            end
+        end
+    end
+    
+    -- Batch get vehicle components
+    local vehicleComponents = timetableHelper.batchGetVehicleComponents(allVehicleIds, api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
+    
+    -- Collect all station pairs for distance calculation
+    local stationPairs = {}
+    local segmentKeys = {}
+    
+    for vehicleID, vehicleComponent in pairs(vehicleComponents) do
+        if vehicleComponent and vehicleComponent.carrier == carrierEnum then
+            local lineID = vehicleToLineMap[vehicleID]
+            if lineID then
                 -- Get stations on this line
+                local lineStations = timetableHelper.getAllStations(lineID)
+                local stationList = {}
+                for k, v in pairs(lineStations) do
+                    table.insert(stationList, {index = k, stationID = v})
+                end
+                table.sort(stationList, function(a, b) return a.index < b.index end)
+                
+                -- Collect station pairs for batch distance calculation
+                for i = 1, #stationList - 1 do
+                    local station1ID = stationList[i].stationID
+                    local station2ID = stationList[i + 1].stationID
+                    local segmentKey = getSegmentKey(station1ID, station2ID)
+                    
+                    if not segments[segmentKey] then
+                        segments[segmentKey] = {
+                            station1 = station1ID,
+                            station2 = station2ID,
+                            vehicleCount = 0,
+                            distance = nil -- Will be calculated in batch
+                        }
+                        table.insert(stationPairs, {station1ID, station2ID})
+                        segmentKeys[#stationPairs] = segmentKey
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Batch calculate all distances
+    local batchDistances = routeFinder.batchCalculateDistances(stationPairs)
+    
+    -- Assign distances to segments
+    for i, pair in ipairs(stationPairs) do
+        local segmentKey = segmentKeys[i]
+        if segmentKey and segments[segmentKey] then
+            local key = tostring(pair[1]) .. "_" .. tostring(pair[2])
+            segments[segmentKey].distance = batchDistances[key] or routeFinder.calculateStationDistance(pair[1], pair[2])
+        end
+    end
+    
+    -- Count vehicles per segment (second pass)
+    for vehicleID, vehicleComponent in pairs(vehicleComponents) do
+        if vehicleComponent and vehicleComponent.carrier == carrierEnum then
+            local lineID = vehicleToLineMap[vehicleID]
+            if lineID then
                 local lineStations = timetableHelper.getAllStations(lineID)
                 local stationList = {}
                 for k, v in pairs(lineStations) do
@@ -575,17 +871,9 @@ function routeFinder.analyzeTrafficFlow(carrierType, updateInterval)
                     local station2ID = stationList[i + 1].stationID
                     local segmentKey = getSegmentKey(station1ID, station2ID)
                     
-                    if not segments[segmentKey] then
-                        segments[segmentKey] = {
-                            station1 = station1ID,
-                            station2 = station2ID,
-                            vehicleCount = 0,
-                            distance = routeFinder.calculateStationDistance(station1ID, station2ID)
-                        }
+                    if segments[segmentKey] then
+                        segments[segmentKey].vehicleCount = segments[segmentKey].vehicleCount + 1
                     end
-                    
-                    -- Count vehicles on this line (simplified: count all vehicles on line)
-                    segments[segmentKey].vehicleCount = segments[segmentKey].vehicleCount + #vehicles
                 end
             end
         end
@@ -629,7 +917,7 @@ function routeFinder.findPathWithTraffic(startStationID, endStationID, carrierTy
     end
     
     -- Validate station IDs exist
-    if not api.engine.entityExists(startStationID) or not api.engine.entityExists(endStationID) then
+    if not cachedEntityExists(startStationID) or not cachedEntityExists(endStationID) then
         return nil
     end
     
@@ -741,7 +1029,7 @@ function routeFinder.findRoutesWithTraffic(startStationID, endStationID, carrier
     end
     
     -- Validate stations exist
-    if not api.engine.entityExists(startStationID) or not api.engine.entityExists(endStationID) then
+    if not cachedEntityExists(startStationID) or not cachedEntityExists(endStationID) then
         return {}
     end
     
@@ -806,6 +1094,119 @@ function routeFinder.findRoutesWithTraffic(startStationID, endStationID, carrier
     return routes
 end
 
+-------------------------------------------------------------
+---------------------- Automatic Timetable Generation ----------------------
+-------------------------------------------------------------
+
+-- Generate timetable from demand patterns (if passenger data available)
+-- @param line integer The line ID
+-- @param station integer The station number
+-- @param frequency integer Desired frequency in seconds
+-- @param startTime table {hour, minute} Start time
+-- @param endTime table {hour, minute} End time
+-- @return boolean success, string message
+function routeFinder.generateTimetableFromDemand(line, station, frequency, startTime, endTime)
+    if not line or not station or not frequency then
+        return false, "Invalid parameters"
+    end
+    
+    frequency = math.max(60, frequency) -- Minimum 1 minute frequency
+    startTime = startTime or {hour = 6, minute = 0}
+    endTime = endTime or {hour = 22, minute = 0}
+    
+    local timetable = require "celmi/timetables/timetable"
+    
+    -- Calculate number of slots
+    local startSeconds = startTime.hour * 3600 + startTime.minute * 60
+    local endSeconds = endTime.hour * 3600 + endTime.minute * 60
+    local duration = endSeconds - startSeconds
+    if duration < 0 then duration = duration + 86400 end
+    
+    local numSlots = math.floor(duration / frequency)
+    
+    if numSlots == 0 then
+        return false, "Invalid time range"
+    end
+    
+    -- Generate slots
+    local slots = {}
+    for i = 0, numSlots - 1 do
+        local arrivalSeconds = (startSeconds + i * frequency) % 86400
+        local departureSeconds = (arrivalSeconds + 30) % 86400 -- 30 second dwell time
+        
+        local arrHour = math.floor(arrivalSeconds / 3600) % 24
+        local arrMin = math.floor((arrivalSeconds % 3600) / 60)
+        local arrSec = arrivalSeconds % 60
+        local depHour = math.floor(departureSeconds / 3600) % 24
+        local depMin = math.floor((departureSeconds % 3600) / 60)
+        local depSec = departureSeconds % 60
+        
+        table.insert(slots, {arrMin, arrSec, depMin, depSec})
+    end
+    
+    -- Apply to timetable
+    timetable.setConditionType(line, station, "ArrDep")
+    for _, slot in ipairs(slots) do
+        timetable.addCondition(line, station, {type = "ArrDep", ArrDep = slot})
+    end
+    
+    return true, "Generated " .. numSlots .. " timetable slots"
+end
+
+-- Suggest optimal frequency based on line characteristics
+-- @param line integer The line ID
+-- @return integer Suggested frequency in seconds, or nil if cannot determine
+function routeFinder.suggestOptimalFrequency(line)
+    if not line then return nil end
+    
+    local timetableHelper = require "celmi/timetables/timetable_helper"
+    local currentTime = timetableHelper.getTime()
+    
+    -- Get line vehicles
+    local vehicles = timetableHelper.getLineVehicles(line, currentTime)
+    local vehicleCount = 0
+    if vehicles then
+        for _ in pairs(vehicles) do
+            vehicleCount = vehicleCount + 1
+        end
+    end
+    
+    -- Get line stations
+    local stations = timetableHelper.getAllStations(line)
+    local stationCount = 0
+    if stations then
+        for _ in pairs(stations) do
+            stationCount = stationCount + 1
+        end
+    end
+    
+    -- Simple heuristic: more vehicles = higher frequency
+    -- Base frequency: 15 minutes (900 seconds)
+    -- Adjust based on vehicle count
+    if vehicleCount == 0 then
+        return 900 -- Default 15 minutes
+    elseif vehicleCount == 1 then
+        return 1800 -- 30 minutes for single vehicle
+    elseif vehicleCount <= 3 then
+        return 900 -- 15 minutes
+    elseif vehicleCount <= 6 then
+        return 600 -- 10 minutes
+    else
+        return 300 -- 5 minutes for high frequency
+    end
+end
+
+-- Optimize timetable slot placement based on demand peaks
+-- This is a placeholder - would need passenger flow data from API
+-- @param line integer The line ID
+-- @param station integer The station number
+-- @return boolean success, string message
+function routeFinder.optimizeTimetableForDemand(line, station)
+    -- This would require access to passenger flow data
+    -- For now, return a message indicating feature is not fully implemented
+    return false, "Demand optimization requires passenger flow data API (not yet available)"
+end
+
 -- Clear traffic cache (call when network changes significantly)
 function routeFinder.clearTrafficCache(carrierType)
     if carrierType then
@@ -841,6 +1242,25 @@ function routeFinder.identifyHubs(carrierType, maxHubs)
     local hubs = {}
     local networkGraph = routeFinder.buildNetworkGraph(carrierType)
     
+    -- Batch collect all station IDs for component fetching
+    local allStationIDs = {}
+    for _, station in ipairs(stations) do
+        table.insert(allStationIDs, station.id)
+    end
+    
+    -- Batch fetch all station components at once
+    local currentTime = timetableHelper.getTime()
+    local stationComponents = timetableHelper.batchGetLineComponents(allStationIDs, api.type.ComponentType.STATION_GROUP, currentTime)
+    
+    -- Pre-calculate distances for all station pairs using batch operation
+    local stationPairs = {}
+    for i = 1, #stations do
+        for j = i + 1, #stations do
+            table.insert(stationPairs, {stations[i].id, stations[j].id})
+        end
+    end
+    local batchDistances = routeFinder.batchCalculateDistances(stationPairs)
+    
     -- Calculate hub scores for each station
     for _, station in ipairs(stations) do
         local stationID = station.id
@@ -849,11 +1269,11 @@ function routeFinder.identifyHubs(carrierType, maxHubs)
         
         -- Factor 1: Number of existing lines serving station (30% weight)
         local linesServingStation = 0
-        local lines = api.engine.system.lineSystem.getLines()
+        local lines = timetableHelper.getLines(currentTime)
         for _, lineID in pairs(lines) do
-            local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
+            local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
             if vehicles and vehicles[1] then
-                local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
+                local vehicleComponent = timetableHelper.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
                 if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
                     local lineStations = timetableHelper.getAllStations(lineID)
                     for _, lineStationID in pairs(lineStations) do
@@ -872,12 +1292,14 @@ function routeFinder.identifyHubs(carrierType, maxHubs)
         end
         
         -- Factor 2: Geographic centrality (20% weight)
-        -- Calculate average distance to all other stations
+        -- Calculate average distance to all other stations using cached distances
         local totalDistance = 0
         local stationCount = 0
         for _, otherStation in ipairs(stations) do
             if otherStation.id ~= stationID then
-                local distance = routeFinder.calculateStationDistance(stationID, otherStation.id)
+                local key1 = tostring(stationID) .. "_" .. tostring(otherStation.id)
+                local key2 = tostring(otherStation.id) .. "_" .. tostring(stationID)
+                local distance = batchDistances[key1] or batchDistances[key2] or routeFinder.calculateStationDistance(stationID, otherStation.id)
                 totalDistance = totalDistance + distance
                 stationCount = stationCount + 1
             end
@@ -892,8 +1314,8 @@ function routeFinder.identifyHubs(carrierType, maxHubs)
         end
         
         -- Factor 3: Station size/capacity (30% weight)
-        -- Try to get station size (may not be available in API)
-        local stationComponent = api.engine.getComponent(stationID, api.type.ComponentType.STATION_GROUP)
+        -- Use batch-fetched station component
+        local stationComponent = stationComponents[stationID]
         local sizeFactor = 50 -- Default medium size
         if stationComponent then
             -- Estimate size based on number of platforms or carriers (if available)
@@ -911,9 +1333,9 @@ function routeFinder.identifyHubs(carrierType, maxHubs)
         local isTerminus = false
         local terminusCount = 0
         for _, lineID in pairs(lines) do
-            local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
+            local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
             if vehicles and vehicles[1] then
-                local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
+                local vehicleComponent = timetableHelper.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
                 if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
                     local lineStations = timetableHelper.getAllStations(lineID)
                     local stationList = {}
@@ -982,16 +1404,17 @@ function routeFinder.analyzeNetworkEfficiency(carrierType)
         overlapSegments = {}
     }
     
-    local lines = api.engine.system.lineSystem.getLines()
+    local currentTime = timetableHelper.getTime()
+    local lines = timetableHelper.getLines(currentTime)
     local segmentUsage = {} -- Track how many routes use each segment
     local destinationCounts = {} -- Track common destinations
     local stationCoverage = {} -- Track which stations are served
-    
+
     -- Analyze all lines
     for _, lineID in pairs(lines) do
-        local vehicles = api.engine.system.transportVehicleSystem.getLineVehicles(lineID)
+        local vehicles = timetableHelper.getLineVehicles(lineID, currentTime)
         if vehicles and vehicles[1] then
-            local vehicleComponent = api.engine.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
+            local vehicleComponent = timetableHelper.getComponent(vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE, currentTime)
             if vehicleComponent and vehicleComponent.carrier == CARRIER_TYPES[carrierType] then
                 local lineStations = timetableHelper.getAllStations(lineID)
                 local stationList = {}
@@ -1080,7 +1503,7 @@ function routeFinder.suggestHubRoute(origin, destination, carrierType, hubs)
     end
     
     -- Validate stations exist
-    if not api.engine.entityExists(origin) or not api.engine.entityExists(destination) then
+    if not cachedEntityExists(origin) or not cachedEntityExists(destination) then
         return nil
     end
     
@@ -1160,7 +1583,7 @@ function routeFinder.generateFeederRoutes(hubStationID, carrierType, maxFeederRo
     end
     
     -- Validate hub station exists
-    if not api.engine.entityExists(hubStationID) then
+    if not cachedEntityExists(hubStationID) then
         return {}
     end
     
