@@ -324,6 +324,61 @@ function timetableHelper.getLegTimes(line)
     end
 end
 
+-- Predict arrival time for a vehicle at a target station
+-- Uses current position, historical section times, and current delay status
+---@param vehicle number The vehicle ID
+---@param targetStation number The target station index on the line
+---@return number|nil Predicted arrival time in seconds, or nil if prediction unavailable
+function timetableHelper.predictArrivalTime(vehicle, targetStation)
+    if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
+    if not(type(vehicle) == "number") then return nil end
+    if not targetStation then return nil end
+    
+    local vehicleInfo = timetableHelper.getVehicleInfo(vehicle)
+    if not vehicleInfo then return nil end
+    
+    local currentStop = vehicleInfo.stopIndex + 1
+    if currentStop >= targetStation then
+        -- Vehicle already past or at target station
+        return timetableHelper.getTime() -- Return current time
+    end
+    
+    -- Get section times (time between stations)
+    local sectionTimes = vehicleInfo.sectionTimes
+    if not sectionTimes then return nil end
+    
+    -- Calculate remaining journey time
+    local remainingTime = 0
+    for i = currentStop, targetStation - 1 do
+        if sectionTimes[i] then
+            remainingTime = remainingTime + (sectionTimes[i] / 1000) -- Convert ms to seconds
+        else
+            -- If no section time data, use average or estimate
+            remainingTime = remainingTime + 60 -- Default 1 minute estimate
+        end
+    end
+    
+    -- Factor in current delay (if vehicle is at a station and delayed)
+    local currentTime = timetableHelper.getTime()
+    local currentDelay = 0
+    
+    if vehicleInfo.state == api.type.enum.TransportVehicleState.AT_TERMINAL then
+        -- Vehicle is at a station, check if it's delayed
+        local delayTracker = require "celmi/timetables/delay_tracker"
+        if vehicleInfo.line then
+            local delay = delayTracker.getArrivalDelay(vehicleInfo.line, currentStop, vehicle)
+            if delay then
+                currentDelay = delay
+            end
+        end
+    end
+    
+    -- Add delay to prediction (assumes delay will persist)
+    local predictedArrival = currentTime + remainingTime + (currentDelay * 0.5) -- Use 50% of current delay
+    
+    return predictedArrival
+end
+
 -------------------------------------------------------------
 ---------------------- Station related ----------------------
 -------------------------------------------------------------

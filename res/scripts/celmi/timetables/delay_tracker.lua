@@ -1,0 +1,417 @@
+-- Delay Tracker Module
+-- Unified delay tracking system for features #14 (Departure Display), #15 (Statistics), #22 (Departure Board)
+-- Batch delay calculations, cache results, incremental updates
+
+local delayTracker = {}
+
+-- Delay cache: lineID -> stationID -> vehicleID -> {delay = seconds, lastUpdate = timestamp}
+local delayCache = {}
+
+-- Statistics cache: lineID -> stationID -> {onTimeCount = n, totalCount = n, avgDelay = seconds}
+local statisticsCache = {}
+
+-- Circular buffer for delay history (last N departures)
+local DELAY_HISTORY_SIZE = 100
+local delayHistory = {}
+
+-- Arrival delay cache (tracks arrival delays separately from departure delays)
+-- Format: arrivalDelayCache[line][station][vehicle] = {delay = seconds, arrivalTime = timestamp, scheduledArrival = timestamp}
+local arrivalDelayCache = {}
+
+-- Delay history by time of day (for pattern analysis)
+-- Format: timeBasedDelayHistory[line][station][timeOfDayBucket] = {delays = {...}, count = n}
+local timeBasedDelayHistory = {}
+local TIME_BUCKET_SIZE = 300 -- 5 minute buckets
+
+-- Pattern detection cache
+-- Format: delayPatternCache[line][station] = {pattern = {...}, lastUpdate = timestamp}
+local delayPatternCache = {}
+
+-- Initialize delay tracker
+function delayTracker.initialize()
+    delayCache = {}
+    statisticsCache = {}
+    delayHistory = {}
+    arrivalDelayCache = {}
+    timeBasedDelayHistory = {}
+    delayPatternCache = {}
+end
+
+-- Calculate delay for a vehicle at a station
+-- delay = actualTime - scheduledTime (positive = late, negative = early)
+function delayTracker.calculateDelay(vehicle, line, station, scheduledTime, currentTime)
+    if not scheduledTime or not currentTime then return nil end
+    return currentTime - scheduledTime
+end
+
+-- Record delay for a vehicle departure/arrival
+function delayTracker.recordDelay(line, station, vehicle, delay, currentTime)
+    if not line or not station or not vehicle or not delay then return end
+    
+    if not delayCache[line] then delayCache[line] = {} end
+    if not delayCache[line][station] then delayCache[line][station] = {} end
+    
+    delayCache[line][station][vehicle] = {
+        delay = delay,
+        lastUpdate = currentTime
+    }
+    
+    -- Update statistics
+    if not statisticsCache[line] then statisticsCache[line] = {} end
+    if not statisticsCache[line][station] then
+        statisticsCache[line][station] = {
+            onTimeCount = 0,
+            totalCount = 0,
+            avgDelay = 0,
+            sumDelay = 0
+        }
+    end
+    
+    local stats = statisticsCache[line][station]
+    stats.totalCount = stats.totalCount + 1
+    stats.sumDelay = stats.sumDelay + delay
+    
+    -- Consider on-time if delay is within ±30 seconds
+    if math.abs(delay) <= 30 then
+        stats.onTimeCount = stats.onTimeCount + 1
+    end
+    
+    -- Update average delay
+    stats.avgDelay = stats.sumDelay / stats.totalCount
+    
+    -- Add to history (circular buffer)
+    table.insert(delayHistory, {
+        line = line,
+        station = station,
+        vehicle = vehicle,
+        delay = delay,
+        time = currentTime
+    })
+    
+    -- Keep only last N entries
+    if #delayHistory > DELAY_HISTORY_SIZE then
+        table.remove(delayHistory, 1)
+    end
+end
+
+-- Get delay for a vehicle
+function delayTracker.getDelay(line, station, vehicle)
+    if not delayCache[line] or not delayCache[line][station] or not delayCache[line][station][vehicle] then
+        return nil
+    end
+    return delayCache[line][station][vehicle].delay
+end
+
+-- Get statistics for a line/station
+function delayTracker.getStatistics(line, station)
+    if not statisticsCache[line] or not statisticsCache[line][station] then
+        return {
+            onTimeCount = 0,
+            totalCount = 0,
+            avgDelay = 0,
+            onTimePercentage = 0
+        }
+    end
+    
+    local stats = statisticsCache[line][station]
+    local onTimePercentage = stats.totalCount > 0 and (stats.onTimeCount / stats.totalCount * 100) or 0
+    
+    return {
+        onTimeCount = stats.onTimeCount,
+        totalCount = stats.totalCount,
+        avgDelay = stats.avgDelay,
+        onTimePercentage = onTimePercentage
+    }
+end
+
+-- Get delay history (last N entries)
+function delayTracker.getDelayHistory(count)
+    count = count or 10
+    local startIndex = math.max(1, #delayHistory - count + 1)
+    local result = {}
+    for i = startIndex, #delayHistory do
+        table.insert(result, delayHistory[i])
+    end
+    return result
+end
+
+-- Record arrival delay (when vehicle arrives vs scheduled arrival)
+function delayTracker.recordArrivalDelay(line, station, vehicle, delay, arrivalTime, scheduledArrivalTime)
+    if not line or not station or not vehicle or not delay then return end
+    
+    if not arrivalDelayCache[line] then arrivalDelayCache[line] = {} end
+    if not arrivalDelayCache[line][station] then arrivalDelayCache[line][station] = {} end
+    
+    arrivalDelayCache[line][station][vehicle] = {
+        delay = delay,
+        arrivalTime = arrivalTime,
+        scheduledArrival = scheduledArrivalTime
+    }
+    
+    -- Add to time-based history for pattern analysis
+    local timeBucket = math.floor((arrivalTime % 3600) / TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
+    if not timeBasedDelayHistory[line] then timeBasedDelayHistory[line] = {} end
+    if not timeBasedDelayHistory[line][station] then timeBasedDelayHistory[line][station] = {} end
+    if not timeBasedDelayHistory[line][station][timeBucket] then
+        timeBasedDelayHistory[line][station][timeBucket] = {delays = {}, count = 0}
+    end
+    
+    local bucket = timeBasedDelayHistory[line][station][timeBucket]
+    table.insert(bucket.delays, delay)
+    bucket.count = bucket.count + 1
+    
+    -- Keep only last 50 delays per bucket
+    if #bucket.delays > 50 then
+        table.remove(bucket.delays, 1)
+    end
+end
+
+-- Get arrival delay for a vehicle
+function delayTracker.getArrivalDelay(line, station, vehicle)
+    if not arrivalDelayCache[line] or not arrivalDelayCache[line][station] or not arrivalDelayCache[line][station][vehicle] then
+        return nil
+    end
+    return arrivalDelayCache[line][station][vehicle].delay
+end
+
+-- Get historical delay for a time of day (average delay for similar time periods)
+function delayTracker.getHistoricalDelay(line, station, timeOfDay)
+    if not line or not station or not timeOfDay then return nil end
+    
+    local timeBucket = math.floor((timeOfDay % 3600) / TIME_BUCKET_SIZE) * TIME_BUCKET_SIZE
+    
+    if not timeBasedDelayHistory[line] or not timeBasedDelayHistory[line][station] or 
+       not timeBasedDelayHistory[line][station][timeBucket] then
+        return nil
+    end
+    
+    local bucket = timeBasedDelayHistory[line][station][timeBucket]
+    if bucket.count == 0 then return nil end
+    
+    -- Calculate average delay for this time bucket
+    local sum = 0
+    for _, delay in ipairs(bucket.delays) do
+        sum = sum + delay
+    end
+    
+    return sum / bucket.count
+end
+
+-- Detect delay patterns for a line/station
+function delayTracker.detectPatterns(line, station)
+    if not line or not station then return nil end
+    
+    -- Check cache first
+    if delayPatternCache[line] and delayPatternCache[line][station] then
+        local cached = delayPatternCache[line][station]
+        -- Cache valid for 5 minutes
+        local currentTime = require("celmi/timetables/timetable_helper").getTime()
+        if currentTime - cached.lastUpdate < 300 then
+            return cached.pattern
+        end
+    end
+    
+    local pattern = {
+        consistentlyLate = false,
+        consistentlyEarly = false,
+        averageDelay = 0,
+        delayVariance = 0,
+        timeOfDayPeaks = {}
+    }
+    
+    if not timeBasedDelayHistory[line] or not timeBasedDelayHistory[line][station] then
+        return pattern
+    end
+    
+    local allDelays = {}
+    local buckets = timeBasedDelayHistory[line][station]
+    
+    -- Collect all delays
+    for timeBucket, bucket in pairs(buckets) do
+        for _, delay in ipairs(bucket.delays) do
+            table.insert(allDelays, delay)
+        end
+        
+        -- Find time-of-day peaks (buckets with high average delays)
+        if bucket.count > 5 then
+            local sum = 0
+            for _, d in ipairs(bucket.delays) do
+                sum = sum + d
+            end
+            local avg = sum / bucket.count
+            if avg > 60 then -- More than 1 minute average delay
+                table.insert(pattern.timeOfDayPeaks, {
+                    timeBucket = timeBucket,
+                    averageDelay = avg
+                })
+            end
+        end
+    end
+    
+    if #allDelays > 0 then
+        -- Calculate average
+        local sum = 0
+        for _, delay in ipairs(allDelays) do
+            sum = sum + delay
+        end
+        pattern.averageDelay = sum / #allDelays
+        
+        -- Calculate variance
+        local varianceSum = 0
+        for _, delay in ipairs(allDelays) do
+            varianceSum = varianceSum + (delay - pattern.averageDelay) * (delay - pattern.averageDelay)
+        end
+        pattern.delayVariance = varianceSum / #allDelays
+        
+        -- Check for consistent patterns
+        local lateCount = 0
+        local earlyCount = 0
+        for _, delay in ipairs(allDelays) do
+            if delay > 30 then lateCount = lateCount + 1 end
+            if delay < -30 then earlyCount = earlyCount + 1 end
+        end
+        
+        pattern.consistentlyLate = (lateCount / #allDelays) > 0.7
+        pattern.consistentlyEarly = (earlyCount / #allDelays) > 0.7
+    end
+    
+    -- Cache the pattern
+    if not delayPatternCache[line] then delayPatternCache[line] = {} end
+    delayPatternCache[line][station] = {
+        pattern = pattern,
+        lastUpdate = require("celmi/timetables/timetable_helper").getTime()
+    }
+    
+    return pattern
+end
+
+-- Get statistics with time-based filtering
+function delayTracker.getStatisticsWithTimeFilter(line, station, startTimeOfDay, endTimeOfDay)
+    if not line or not station then
+        return delayTracker.getStatistics(line, station)
+    end
+    
+    -- Collect delays within time range
+    local relevantDelays = {}
+    local buckets = timeBasedDelayHistory[line] and timeBasedDelayHistory[line][station]
+    
+    if buckets then
+        for timeBucket, bucket in pairs(buckets) do
+            if timeBucket >= startTimeOfDay and timeBucket <= endTimeOfDay then
+                for _, delay in ipairs(bucket.delays) do
+                    table.insert(relevantDelays, delay)
+                end
+            end
+        end
+    end
+    
+    if #relevantDelays == 0 then
+        return {
+            onTimeCount = 0,
+            totalCount = 0,
+            avgDelay = 0,
+            onTimePercentage = 0
+        }
+    end
+    
+    -- Calculate statistics
+    local onTimeCount = 0
+    local sum = 0
+    local minDelay = math.huge
+    local maxDelay = -math.huge
+    
+    for _, delay in ipairs(relevantDelays) do
+        if math.abs(delay) <= 30 then
+            onTimeCount = onTimeCount + 1
+        end
+        sum = sum + delay
+        if delay < minDelay then minDelay = delay end
+        if delay > maxDelay then maxDelay = delay end
+    end
+    
+    return {
+        onTimeCount = onTimeCount,
+        totalCount = #relevantDelays,
+        avgDelay = sum / #relevantDelays,
+        onTimePercentage = (onTimeCount / #relevantDelays) * 100,
+        minDelay = minDelay,
+        maxDelay = maxDelay,
+        medianDelay = delayTracker.calculateMedian(relevantDelays)
+    }
+end
+
+-- Calculate median of a sorted array
+function delayTracker.calculateMedian(sortedArray)
+    if #sortedArray == 0 then return 0 end
+    
+    local sorted = {}
+    for _, v in ipairs(sortedArray) do
+        table.insert(sorted, v)
+    end
+    table.sort(sorted)
+    
+    local mid = math.floor(#sorted / 2)
+    if #sorted % 2 == 0 then
+        return (sorted[mid] + sorted[mid + 1]) / 2
+    else
+        return sorted[mid + 1]
+    end
+end
+
+-- Enhanced statistics with distribution data
+function delayTracker.getEnhancedStatistics(line, station)
+    local baseStats = delayTracker.getStatistics(line, station)
+    
+    -- Add delay distribution if we have history
+    local allDelays = {}
+    if delayHistory then
+        for _, entry in ipairs(delayHistory) do
+            if entry.line == line and entry.station == station then
+                table.insert(allDelays, entry.delay)
+            end
+        end
+    end
+    
+    if #allDelays > 0 then
+        table.sort(allDelays)
+        baseStats.minDelay = allDelays[1]
+        baseStats.maxDelay = allDelays[#allDelays]
+        baseStats.medianDelay = delayTracker.calculateMedian(allDelays)
+        
+        -- Calculate percentiles
+        local p25Index = math.floor(#allDelays * 0.25)
+        local p75Index = math.floor(#allDelays * 0.75)
+        baseStats.p25Delay = allDelays[p25Index + 1] or 0
+        baseStats.p75Delay = allDelays[p75Index + 1] or 0
+    end
+    
+    return baseStats
+end
+
+-- Clean up old cache entries (called periodically)
+function delayTracker.cleanup(currentTime, maxAge)
+    maxAge = maxAge or 3600 -- Default: 1 hour
+    
+    for line, lineData in pairs(delayCache) do
+        for station, stationData in pairs(lineData) do
+            for vehicle, delayData in pairs(stationData) do
+                if currentTime - delayData.lastUpdate > maxAge then
+                    stationData[vehicle] = nil
+                end
+            end
+        end
+    end
+    
+    -- Clean up arrival delay cache
+    for line, lineData in pairs(arrivalDelayCache) do
+        for station, stationData in pairs(lineData) do
+            for vehicle, delayData in pairs(stationData) do
+                if currentTime - delayData.arrivalTime > maxAge then
+                    stationData[vehicle] = nil
+                end
+            end
+        end
+    end
+end
+
+return delayTracker
